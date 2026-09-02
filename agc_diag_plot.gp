@@ -9,7 +9,13 @@ datafile = system("echo $HOME") . "/agc_diag.csv"
 # Sized wide and tall enough that three stacked panels are each still
 # readable -- the default wxt window is far too small for a 3-row
 # multiplot. Adjust size/position for your own screen if needed.
-set terminal wxt size 1260,960 position 0,0 enhanced font "sans,9"
+#
+# noenhanced: "enhanced" text mode treats '_' and '~' as subscript/
+# overstrike markup rather than literal characters, which is what
+# actually garbled "agc_diag.csv" (real underscore) and "~/agc_diag.csv"
+# (literal tilde) in the waiting-for-data label -- not a real filename
+# problem. None of this script's text needs sub/superscripts.
+set terminal wxt size 1260,960 position 0,0 noenhanced font "sans,9"
 
 set datafile separator ","
 set grid
