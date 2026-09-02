@@ -72,15 +72,29 @@ while (1) {
 
     set title "Input loudness (momentary LUFS)"
     set ylabel "LUFS"
-    # Autoscaled, not a fixed floor -- real raw (pre-AGC) mic input
-    # routinely sits well below -40 LUFS (seen as low as -60+ in testing),
-    # so a hardcoded floor silently produced an "all points out of range"
-    # empty panel instead of an error.
-    set yrange [*:*]
     unset key
     if (has_data) {
+        # Autoscaled, not a fixed floor -- real raw (pre-AGC) mic input
+        # routinely sits well below -40 LUFS (seen as low as -60+ in
+        # testing), so a hardcoded floor silently produced an "all points
+        # out of range" empty panel instead of an error.
+        set yrange [*:*]
         plot window_file using ($1/1000.0):2 with lines lc rgb "#2266cc" title "input LUFS"
     } else {
+        # Fixed range, NOT [*:*] -- autoscaling `plot NaN` when there is no
+        # other data anywhere yet to scale against is a FATAL gnuplot error
+        # ("all points y value undefined!"), not just a cosmetic warning:
+        # it kills the whole interpreter process outright. Confirmed via
+        # direct reproduction -- exit code 1 with yrange [*:*], exit code 0
+        # with any fixed range. This is what was actually behind gnuplot
+        # going permanently blank the moment the modem started: has_data
+        # flipping false for the first time in a session hit exactly this,
+        # silently killing the main gnuplot process while `-persist` kept
+        # its now-orphaned window open showing whatever was last drawn --
+        # looking exactly like a frozen/stuck window from the outside, and
+        # explaining why only a fresh launch against an already-nonempty
+        # file ever appeared to work.
+        set yrange [-1:1]
         # Not a literal "~/..." string -- that combination rendered as a
         # garbled glyph in this font/terminal (the '~' overlapping the
         # following 'a'). Uses the already-resolved datafile path instead,
@@ -93,12 +107,13 @@ while (1) {
 
     set title "AGC gain"
     set ylabel "dB"
-    set yrange [*:*]
     if (has_data) {
+        set yrange [*:*]
         set key outside top center horizontal
         plot window_file using ($1/1000.0):3 with lines lc rgb "#cc6622" title "target gain", \
              window_file using ($1/1000.0):4 with lines lc rgb "#22aa44" title "current gain"
     } else {
+        set yrange [-1:1]
         unset key
         plot NaN notitle
     }
@@ -106,11 +121,12 @@ while (1) {
     set title "Output level (post-AGC, post-limiter)"
     set xlabel "elapsed seconds"
     set ylabel "dBFS"
-    set yrange [*:*]
     unset key
     if (has_data) {
+        set yrange [*:*]
         plot window_file using ($1/1000.0):5 with lines lc rgb "#aa2266" title "output dBFS"
     } else {
+        set yrange [-1:1]
         plot NaN notitle
     }
 
