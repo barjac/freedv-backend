@@ -9,15 +9,27 @@ datafile = system("echo $HOME") . "/agc_diag.csv"
 # A long session logs at ~100 rows/sec and only the last 30s is ever
 # shown, but stats/plot re-parsing the *entire*, ever-growing datafile
 # every second doesn't scale to a long session. window_file is a small
-# rolling tail of datafile, refreshed independently by a `tail -n 6000`
-# loop started alongside this script in freedv-start-diag -- NOT by this
-# script itself via system(): calling `tail` via system() from here
-# worked fine in isolated testing, but silently never took effect at all
-# once actually run the way freedv-start-diag launches this script
-# (backgrounded, inside a nested script, inside konsole) -- window_file
-# stayed stuck at its very first snapshot indefinitely, for reasons not
-# pinned down. Keeping datafile-refresh as a separate, ordinary
-# foreground-in-its-own-right shell loop sidesteps whatever that was.
+# rolling tail of datafile, refreshed via `tail` right below, once per
+# loop iteration, by this script itself -- NOT by a separate process.
+#
+# An earlier version had a standalone shell loop in freedv-start-diag
+# doing this refresh independently and concurrently. That seemed
+# necessary at the time because calling `tail` via system() from inside
+# this script appeared to silently stop taking effect once actually run
+# the way freedv-start-diag launches it -- but that was investigated
+# before the fatal has_data-false crash bug (see below) was found and
+# fixed, and was most likely actually that same crash killing the whole
+# process early, not a real problem with system(). The two-process
+# version then went on to cause a *different*, confirmed, reproducible
+# bug of its own: window_file could be read by this script's own
+# stats/plot calls while the other process was concurrently rewriting
+# it, causing "all points out of range" (even switching that loop to
+# atomic write-then-rename only narrowed the race, since gnuplot's own
+# autoscale still does more than one internal pass over the file, and
+# the two reads could land on different -- if individually consistent --
+# versions of it). A single process, refreshing synchronously right
+# before reading, has no concurrent writer and so cannot have this
+# problem at all.
 window_file = system("echo $HOME") . "/agc_diag_window.csv"
 
 # Sized wide and tall enough that three stacked panels are each still
@@ -46,6 +58,13 @@ set datafile separator ","
 set grid
 
 while (1) {
+
+    # Refresh window_file from datafile synchronously, right here, before
+    # anything below reads it -- single process, no concurrent writer, so
+    # nothing can observe a torn/mid-write version of it. Written to a
+    # temp file then renamed into place regardless, out of caution (costs
+    # nothing) even though this script is now the only writer.
+    system("tail -n 6000 '" . datafile . "' > '" . window_file . ".tmp' 2>/dev/null && mv -f '" . window_file . ".tmp' '" . window_file . "' 2>/dev/null")
 
     # Show roughly the last 30 seconds so the plot stays readable during a
     # long session, once there's enough data to make that meaningful.
