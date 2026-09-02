@@ -29,7 +29,18 @@ window_file = system("echo $HOME") . "/agc_diag_window.csv"
 # actually garbled "agc_diag.csv" (real underscore) and "~/agc_diag.csv"
 # (literal tilde) in the waiting-for-data label -- not a real filename
 # problem. None of this script's text needs sub/superscripts.
-set terminal wxt size 1260,960 position 0,0 noenhanced font "sans,9"
+#
+# x11, not wxt: the script's logic and the data feeding it are both
+# confirmed correct (has_data flips true, window_file has fresh valid
+# rows, no errors in gnuplot's own stderr) -- yet the window stayed
+# permanently blank past its title bar through multiple long, real
+# transmissions once actually launched the way freedv-start-diag does
+# (backgrounded, nested script, inside konsole). Never reproduced this
+# in any isolated/foreground test. x11 is gnuplot's older, more basic
+# interactive terminal -- worth trying as it doesn't share wxt's
+# wxWidgets toolkit plumbing, a plausible source of a context-specific
+# redraw bug that never surfaces as a script-level error.
+set terminal x11 size 1260,960 position 0,0 noenhanced font "sans,9"
 
 set datafile separator ","
 set grid
