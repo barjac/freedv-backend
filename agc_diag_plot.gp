@@ -148,7 +148,14 @@ while (1) {
         # input has been seen as low as -60ish in testing -- -70:5 covers
         # that with margin either way.
         set yrange [-70:5]
-        plot window_file using ($1/1000.0):2 with lines lc rgb "#2266cc" title "input LUFS"
+        # `with points`, not `with lines` -- several 10ms blocks can land
+        # in the same integer millisecond (elapsed_ms has ms resolution,
+        # not sub-ms), so consecutive rows sometimes share an x value with
+        # different y values. Connected with lines, that draws a tall
+        # near-vertical zigzag at that x before moving on -- looks like a
+        # spike, isn't one; it's several real points stacked at (almost)
+        # the same x. Points has no connecting segments, so no artifact.
+        plot window_file using ($1/1000.0):2 with points pt 7 ps 0.3 lc rgb "#2266cc" title "input LUFS"
     } else {
         # Fixed range, NOT [*:*] -- autoscaling `plot NaN` when there is no
         # other data anywhere yet to scale against is a FATAL gnuplot error
@@ -183,8 +190,11 @@ while (1) {
         # covers that with margin.
         set yrange [-25:15]
         set key outside top center horizontal
-        plot window_file using ($1/1000.0):3 with lines lc rgb "#cc6622" title "target gain", \
-             window_file using ($1/1000.0):4 with lines lc rgb "#22aa44" title "current gain"
+        # `with points`, not `with lines` -- see the input-LUFS panel's
+        # comment above for why (same-millisecond rows, connected lines
+        # producing a vertical-zigzag artifact that isn't real).
+        plot window_file using ($1/1000.0):3 with points pt 7 ps 0.3 lc rgb "#cc6622" title "target gain", \
+             window_file using ($1/1000.0):4 with points pt 7 ps 0.3 lc rgb "#22aa44" title "current gain"
     } else {
         set yrange [-1:1]
         unset key
@@ -204,7 +214,12 @@ while (1) {
         # bottom of this range -- deliberate, keeps the interesting ~20dB
         # of real signal readable instead of compressed into a sliver).
         set yrange [-60:5]
-        plot window_file using ($1/1000.0):5 with lines lc rgb "#aa2266" title "output dBFS"
+        # `with points`, not `with lines` -- see the input-LUFS panel's
+        # comment above for why (same-millisecond rows, connected lines
+        # producing a vertical-zigzag artifact that isn't real). This
+        # panel is the noisiest of the three (raw per-10ms-block RMS), so
+        # it's where that artifact was most visible.
+        plot window_file using ($1/1000.0):5 with points pt 7 ps 0.3 lc rgb "#aa2266" title "output dBFS"
     } else {
         set yrange [-1:1]
         plot NaN notitle
