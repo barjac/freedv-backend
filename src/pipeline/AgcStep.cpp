@@ -34,6 +34,8 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
+#include <string>
 
 #include "AgcStep.h"
 #include "../util/logging/ulog.h"
@@ -59,6 +61,7 @@ AgcStep::AgcStep(int sampleRate, std::atomic<float>* gainOutputDb)
     , currentGainDb_(0.0)
     , inputSampleFifo_(MAX_AGC_SAMPLES + 1)
     , gainOutputDb_(gainOutputDb)
+    , diagLogFile_(nullptr)
 {
     numSamplesPerRun_ = std::min(MAX_AGC_SAMPLES, sampleRate_ / TEN_MS_DIVIDER); // 10ms blocks, 160 max samples
     assert(numSamplesPerRun_ > 0);
@@ -96,6 +99,20 @@ AgcStep::AgcStep(int sampleRate, std::atomic<float>* gainOutputDb)
 
     tmpInput_ = std::make_unique<short[]>(numSamplesPerRun_);
     assert(tmpInput_ != nullptr);
+
+    // DIAGNOSTIC ONLY, see diagLogFile_'s declaration in the header.
+    const char* home = std::getenv("HOME");
+    if (home != nullptr)
+    {
+        std::string path = std::string(home) + "/agc_diag.csv";
+        diagLogFile_ = fopen(path.c_str(), "w");
+        if (diagLogFile_ != nullptr)
+        {
+            fprintf(diagLogFile_, "elapsed_ms,input_lufs,target_gain_db,current_gain_db,output_dbfs\n");
+            fflush(diagLogFile_);
+        }
+    }
+    diagLogStartTime_ = std::chrono::steady_clock::now();
 }
 
 AgcStep::~AgcStep()
@@ -103,6 +120,12 @@ AgcStep::~AgcStep()
     outputSamples_ = nullptr;
     WebRtcAgc_Free(agcState_);
     ebur128_destroy((ebur128_state**)&ebur128State_);
+
+    if (diagLogFile_ != nullptr)
+    {
+        fclose(diagLogFile_);
+        diagLogFile_ = nullptr;
+    }
 }
 
 int AgcStep::getInputSampleRate() const FREEDV_NONBLOCKING
@@ -181,8 +204,37 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
             short echo = 0;
             unsigned char saturationWarning = 1;
             WebRtcAgc_Process(
-                agcState_, const_cast<const int16_t *const *>(&tmpInput), 1, numSamplesPerRun_, 
+                agcState_, const_cast<const int16_t *const *>(&tmpInput), 1, numSamplesPerRun_,
                 const_cast<int16_t *const *>(&tmpOutput), inMicLevel, &outMicLevel, echo, &saturationWarning);
+
+            // DIAGNOSTIC ONLY: logs this block's input loudness, target/
+            // current AGC gain, and post-AGC (post-limiter) output level.
+            // Blocking file I/O accepted here -- diagnostic-only branch, not
+            // for production use. Same rationale as LoudnessMeterStep's
+            // native-rate log (freedv-gui commit 35c8b7c0).
+            if (diagLogFile_ != nullptr)
+            {
+                double outputRms = 0.0;
+                for (int ctr = 0; ctr < numSamplesPerRun_; ctr++)
+                {
+                    double s = tmpOutput[ctr] / 32768.0;
+                    outputRms += s * s;
+                }
+                outputRms = std::sqrt(outputRms / numSamplesPerRun_);
+                double outputDbfs = outputRms > 0.0 ? 20.0 * std::log10(outputRms) : -100.0;
+
+                auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - diagLogStartTime_).count();
+
+                FREEDV_BEGIN_VERIFIED_SAFE
+                fprintf(diagLogFile_, "%lld,%.2f,%.2f,%.2f,%.2f\n",
+                    (long long)elapsedMs,
+                    (result == EBUR128_SUCCESS && lufs != -HUGE_VAL) ? lufs : -100.0,
+                    targetGainDb_, currentGainDb_, outputDbfs);
+                fflush(diagLogFile_);
+                FREEDV_END_VERIFIED_SAFE
+            }
+
             tmpOutput += numSamplesPerRun_;
         }
     }
