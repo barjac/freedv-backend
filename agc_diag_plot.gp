@@ -63,7 +63,21 @@ while (1) {
     has_data = (STATS_records > 5)
 
     if (has_data) {
-        set xrange [(STATS_max / 1000.0) - 30 > 0 ? (STATS_max / 1000.0) - 30 : 0 : STATS_max / 1000.0]
+        # Autoscaled, not computed from STATS_max -- window_file is
+        # refreshed by an independent, asynchronous `tail` loop (see
+        # above), so it can change again between this stats call and the
+        # plot commands below reading it a second time. A range computed
+        # from *this* stats snapshot but applied to a *later* read of the
+        # (by then further-advanced) file caused a real, observed "all
+        # points out of range" during active transmission -- consistently,
+        # not just occasionally, since both loops run on ~1s cadences.
+        # Autoscaling instead derives the range from whatever the plot
+        # commands themselves actually read, so the two can never
+        # disagree. The only cost: since window_file already holds a
+        # bounded ~60s rolling window (see the tail loop), this shows
+        # however much of that is currently in the file rather than
+        # exactly the last 30s -- a cosmetic difference, not a bug.
+        set xrange [*:*]
     } else {
         set xrange [0:10]
     }
