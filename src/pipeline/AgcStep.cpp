@@ -47,7 +47,14 @@
 constexpr float AGC_LOUDNESS_TARGET_LUFS = -23.0;
 constexpr float AGC_MAX_GAIN_DB = 12.0;
 constexpr float AGC_MIN_GAIN_DB = -20.0;
-constexpr float AGC_ATTACK_TIME_SEC = 0.5;
+// Test: was 0.5s. Slower attack means gain doesn't snap back down toward
+// unity on every loud syllable, so it retains more of its climb across a
+// phrase's natural micro-pauses -- the next pause's release starts from
+// a higher baseline already closer to target, instead of restarting from
+// ~0dB each time. Overload risk is partly covered anyway: WebRTC's
+// limiter runs after this stage specifically to catch what AGC doesn't
+// pull down in time (see the WebRtcAgc_Process call below).
+constexpr float AGC_ATTACK_TIME_SEC = 3.0;
 constexpr float AGC_RELEASE_TIME_SEC = 6.0;
 constexpr float SILENCE_THRESHOLD_LUFS = -33.0;
 constexpr int LIMITER_LEVEL_DB = -1;
