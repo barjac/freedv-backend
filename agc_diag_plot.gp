@@ -66,6 +66,28 @@ while (1) {
     # nothing) even though this script is now the only writer.
     system("tail -n 6000 '" . datafile . "' > '" . window_file . ".tmp' 2>/dev/null && mv -f '" . window_file . ".tmp' '" . window_file . "' 2>/dev/null")
 
+    # `stats` filters the data it summarizes against whatever xrange/yrange
+    # currently happen to be *set* ("if the axis is autoscaled, no range
+    # limits are applied -- otherwise only values in range are considered",
+    # per gnuplot's own docs for `stats`) -- and a panel's yrange from the
+    # previous loop iteration (e.g. output dBFS's -60:5) is still sitting
+    # there at the top of THIS iteration, before anything below sets a new
+    # one. Column 1 (elapsed_ms, values in the hundreds of thousands) is
+    # treated as "y" for a single-column stats call, so it was being
+    # filtered against that leftover range and coming back essentially
+    # empty every iteration after the first -- silently, since a
+    # gnuplot-level warning doesn't stop the loop, it just makes
+    # has_data wrongly false and everything downstream chase a ghost. This
+    # was the actual root cause of "all points out of range" appearing
+    # from the second iteration onward, through several failed fix
+    # attempts (autoscale, per-column stats, fixed yrange) that all missed
+    # it because none of them touched *this* call. Force autoscale (no
+    # filtering, confirmed by the same docs) right here so this call is
+    # never at the mercy of whatever a previous iteration's last panel
+    # happened to leave set.
+    set xrange [*:*]
+    set yrange [*:*]
+
     # Show roughly the last 30 seconds so the plot stays readable during a
     # long session, once there's enough data to make that meaningful.
     # STATS_records ends up completely undefined (not 0) after this, in two
@@ -82,21 +104,27 @@ while (1) {
     has_data = (STATS_records > 5)
 
     if (has_data) {
-        # Autoscaled, not computed from STATS_max -- window_file is
-        # refreshed by an independent, asynchronous `tail` loop (see
-        # above), so it can change again between this stats call and the
-        # plot commands below reading it a second time. A range computed
-        # from *this* stats snapshot but applied to a *later* read of the
-        # (by then further-advanced) file caused a real, observed "all
-        # points out of range" during active transmission -- consistently,
-        # not just occasionally, since both loops run on ~1s cadences.
-        # Autoscaling instead derives the range from whatever the plot
-        # commands themselves actually read, so the two can never
-        # disagree. The only cost: since window_file already holds a
-        # bounded ~60s rolling window (see the tail loop), this shows
-        # however much of that is currently in the file rather than
-        # exactly the last 30s -- a cosmetic difference, not a bug.
-        set xrange [*:*]
+        # Explicit numeric range computed from THIS stats call, not
+        # `set xrange [*:*]` -- gnuplot's own autoscale kept producing "all
+        # points out of range" against real, live, actively-growing data,
+        # intermittently, even in this single-process design where nothing
+        # else touches window_file between refresh and reading it. Not
+        # reproduced in any isolated/synthetic test, only in real live
+        # sessions, and the exact mechanism was never pinned down --
+        # tried disabling it via explicit ranges computed from `stats`
+        # instead (already proven reliable throughout this debugging)
+        # rather than continuing to rely on whatever's going wrong inside
+        # gnuplot's own autoscale in this context. window_file doesn't
+        # change again after this point in the same iteration (see the
+        # refresh comment above), so there's no new opportunity for these
+        # bounds to go stale before the plot commands below use them.
+        X_MIN = STATS_min / 1000.0
+        X_MAX = STATS_max / 1000.0
+        # +0.1 guards against a degenerate zero-width range if every row
+        # currently in window_file happens to share one timestamp (seen
+        # early in a session, before real audio arrives).
+        if (X_MAX <= X_MIN) { X_MAX = X_MIN + 0.1 }
+        set xrange [X_MIN:X_MAX]
     } else {
         set xrange [0:10]
     }
@@ -107,11 +135,19 @@ while (1) {
     set ylabel "LUFS"
     unset key
     if (has_data) {
-        # Autoscaled, not a fixed floor -- real raw (pre-AGC) mic input
-        # routinely sits well below -40 LUFS (seen as low as -60+ in
-        # testing), so a hardcoded floor silently produced an "all points
-        # out of range" empty panel instead of an error.
-        set yrange [*:*]
+        # Fixed, generous range -- NOT autoscale, NOT computed from `stats`
+        # on this column either. Both were tried and both still produced
+        # "all points out of range" against real live data, intermittently,
+        # for reasons never pinned down (autoscale: gnuplot's own internal
+        # mechanism; per-column stats: extra stats calls stacked per
+        # iteration appeared to confuse gnuplot's own multiplot/replot
+        # state -- warnings started citing "$GPVAL_LAST_MULTIPLOT" as the
+        # source file, not this script). A fixed range computed from
+        # nothing but AGC's own known constants can't have either problem:
+        # SILENCE_THRESHOLD_LUFS is -33 in AgcStep.cpp, and raw (pre-AGC)
+        # input has been seen as low as -60ish in testing -- -70:5 covers
+        # that with margin either way.
+        set yrange [-70:5]
         plot window_file using ($1/1000.0):2 with lines lc rgb "#2266cc" title "input LUFS"
     } else {
         # Fixed range, NOT [*:*] -- autoscaling `plot NaN` when there is no
@@ -141,7 +177,11 @@ while (1) {
     set title "AGC gain"
     set ylabel "dB"
     if (has_data) {
-        set yrange [*:*]
+        # Fixed, generous range -- see the input-LUFS panel's comment
+        # above for why not autoscale or per-column stats. AGC's own
+        # constants (AgcStep.cpp) clamp gain to [-20:12]dB -- -25:15
+        # covers that with margin.
+        set yrange [-25:15]
         set key outside top center horizontal
         plot window_file using ($1/1000.0):3 with lines lc rgb "#cc6622" title "target gain", \
              window_file using ($1/1000.0):4 with lines lc rgb "#22aa44" title "current gain"
@@ -156,7 +196,14 @@ while (1) {
     set ylabel "dBFS"
     unset key
     if (has_data) {
-        set yrange [*:*]
+        # Fixed, generous range -- see the input-LUFS panel's comment
+        # above for why not autoscale or per-column stats. LIMITER_LEVEL_DB
+        # targets -1dBFS in AgcStep.cpp; -60:5 covers real output down
+        # through quiet passages with margin (occasional true-silence
+        # blocks logged at the -100dBFS sentinel get clipped off the
+        # bottom of this range -- deliberate, keeps the interesting ~20dB
+        # of real signal readable instead of compressed into a sliver).
+        set yrange [-60:5]
         plot window_file using ($1/1000.0):5 with lines lc rgb "#aa2266" title "output dBFS"
     } else {
         set yrange [-1:1]
