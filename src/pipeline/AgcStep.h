@@ -40,18 +40,20 @@
 #include "../3rdparty/WebRTC_AGC/agc.h"
 
 #include <memory>
+#include <cstdio>
+#include <chrono>
 
 class AgcStep : public IPipelineStep
 {
 public:
     AgcStep(int sampleRate);
     virtual ~AgcStep();
-    
+
     virtual int getInputSampleRate() const FREEDV_NONBLOCKING override;
     virtual int getOutputSampleRate() const FREEDV_NONBLOCKING override;
     virtual short* execute(short* inputSamples, int numInputSamples, int* numOutputSamples) FREEDV_NONBLOCKING override;
     virtual void reset() FREEDV_NONBLOCKING override;
-    
+
 private:
     int sampleRate_;
     float targetGainDb_;
@@ -65,6 +67,15 @@ private:
     GenericFIFO<short> inputSampleFifo_;
     std::unique_ptr<short[]> outputSamples_;
     std::unique_ptr<short[]> tmpInput_;
+
+    // DIAGNOSTIC ONLY: logs each 10ms block's input loudness, target/current
+    // AGC gain, and post-AGC output level to ~/agc_diag.csv, for offline
+    // gnuplot analysis of the AGC loop's convergence behavior. Not for
+    // production use -- see the bcj-agc-diagnostic-log branch. Only this
+    // step's own single owning thread ever calls execute(), so no locking
+    // is needed around this file handle.
+    FILE* diagLogFile_;
+    std::chrono::steady_clock::time_point diagLogStartTime_;
 };
 
 
