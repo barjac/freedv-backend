@@ -46,7 +46,12 @@ while (1) {
     if (has_data) {
         plot datafile using ($1/1000.0):2 with lines lc rgb "#2266cc" title "input LUFS"
     } else {
-        set label 1 "waiting for ~/agc_diag.csv (start transmitting in FreeDV)..." at graph 0.5,0.5 center
+        # Not a literal "~/..." string -- that combination rendered as a
+        # garbled glyph in this font/terminal (the '~' overlapping the
+        # following 'a'). Uses the already-resolved datafile path instead,
+        # which also has the benefit of showing the real path if $HOME
+        # ever isn't what you expect.
+        set label 1 "waiting for " . datafile . " (start transmitting in FreeDV)..." at graph 0.5,0.5 center
         plot NaN notitle
         unset label 1
     }
