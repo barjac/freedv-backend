@@ -7,13 +7,17 @@
 datafile = system("echo $HOME") . "/agc_diag.csv"
 
 # A long session logs at ~100 rows/sec and only the last 30s is ever
-# shown, but stats/plot re-parse the *entire* file from scratch every
-# single second regardless -- cost grows unboundedly with session length
-# (tens of thousands of rows within a couple of minutes), until a redraw
-# takes longer than the 1s pause below and the window stops updating
-# cleanly. window_file is refreshed via `tail` each iteration (an O(1)
-# seek-from-end op, not a full read) so stats/plot only ever see a small,
-# constant-size slice no matter how big datafile has grown.
+# shown, but stats/plot re-parsing the *entire*, ever-growing datafile
+# every second doesn't scale to a long session. window_file is a small
+# rolling tail of datafile, refreshed independently by a `tail -n 6000`
+# loop started alongside this script in freedv-start-diag -- NOT by this
+# script itself via system(): calling `tail` via system() from here
+# worked fine in isolated testing, but silently never took effect at all
+# once actually run the way freedv-start-diag launches this script
+# (backgrounded, inside a nested script, inside konsole) -- window_file
+# stayed stuck at its very first snapshot indefinitely, for reasons not
+# pinned down. Keeping datafile-refresh as a separate, ordinary
+# foreground-in-its-own-right shell loop sidesteps whatever that was.
 window_file = system("echo $HOME") . "/agc_diag_window.csv"
 
 # Sized wide and tall enough that three stacked panels are each still
@@ -31,14 +35,6 @@ set datafile separator ","
 set grid
 
 while (1) {
-
-    # 6000 rows is a generous margin over the ~3000 rows/30s a session
-    # actually logs at (~100 rows/sec) -- comfortably covers the xrange
-    # window below with room to spare. `2>/dev/null` covers datafile not
-    # existing yet (before FreeDV's first run): tail then produces nothing,
-    # same as an empty/missing window_file, handled the same as any other
-    # no-data-yet case below.
-    system("tail -n 6000 '" . datafile . "' > '" . window_file . "' 2>/dev/null")
 
     # Show roughly the last 30 seconds so the plot stays readable during a
     # long session, once there's enough data to make that meaningful.
