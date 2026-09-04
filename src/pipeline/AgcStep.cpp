@@ -47,8 +47,8 @@
 constexpr float AGC_LOUDNESS_TARGET_LUFS = -24.0;
 constexpr float AGC_MAX_GAIN_DB = 12.0;
 constexpr float AGC_MIN_GAIN_DB = -20.0;
-constexpr float AGC_ATTACK_TIME_SEC = 3.0;
-constexpr float AGC_RELEASE_TIME_SEC = 3.0;
+constexpr float AGC_ATTACK_TIME_SEC = 2.0;
+constexpr float AGC_RELEASE_TIME_SEC = 2.0;
 constexpr float SILENCE_THRESHOLD_LUFS = -33.0;
 constexpr int LIMITER_LEVEL_DB = -1;
 
