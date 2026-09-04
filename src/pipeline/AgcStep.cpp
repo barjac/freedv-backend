@@ -53,11 +53,12 @@ constexpr int LIMITER_LEVEL_DB = -1;
 constexpr int TEN_MS_DIVIDER = 100;
 constexpr int MAX_AGC_SAMPLES = 160;
 
-AgcStep::AgcStep(int sampleRate)
+AgcStep::AgcStep(int sampleRate, std::atomic<float>* gainOutputDb)
     : sampleRate_(sampleRate == 8000 || sampleRate == 16000 || sampleRate == 32000 || sampleRate == 48000 ? sampleRate : 48000)
     , targetGainDb_(0.0)
     , currentGainDb_(0.0)
     , inputSampleFifo_(MAX_AGC_SAMPLES + 1)
+    , gainOutputDb_(gainOutputDb)
 {
     numSamplesPerRun_ = std::min(MAX_AGC_SAMPLES, sampleRate_ / TEN_MS_DIVIDER); // 10ms blocks, 160 max samples
     assert(numSamplesPerRun_ > 0);
@@ -185,7 +186,16 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
             tmpOutput += numSamplesPerRun_;
         }
     }
-    
+
+    // Publish the current gain for anything polling it from another
+    // thread (e.g. a GUI meter) -- once per execute() call rather than
+    // once per 10ms sub-block above, since nothing reading this needs
+    // finer granularity than the audio thread's own call cadence.
+    if (gainOutputDb_ != nullptr)
+    {
+        gainOutputDb_->store(currentGainDb_, std::memory_order_release);
+    }
+
     return outputSamples;
 }
 
@@ -194,4 +204,9 @@ void AgcStep::reset() FREEDV_NONBLOCKING
     inputSampleFifo_.reset();
     currentGainDb_ = 0;
     targetGainDb_ = 0;
+
+    if (gainOutputDb_ != nullptr)
+    {
+        gainOutputDb_->store(0.0f, std::memory_order_release);
+    }
 }

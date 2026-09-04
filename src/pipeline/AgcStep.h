@@ -39,19 +39,28 @@
 #include "../util/GenericFIFO.h"
 #include "../3rdparty/WebRTC_AGC/agc.h"
 
+#include <atomic>
 #include <memory>
 
 class AgcStep : public IPipelineStep
 {
 public:
-    AgcStep(int sampleRate);
+    // gainOutputDb, if non-null, is updated with currentGainDb_ at the end
+    // of every execute() call -- lets a caller (e.g. a GUI meter) read the
+    // live gain value from another thread without needing a pointer to
+    // this AgcStep instance itself, whose lifetime is tied to the audio
+    // pipeline and can be rebuilt/destroyed independently of anything
+    // polling it. The pointed-to atomic must outlive this object; the
+    // caller owns it and is expected to keep it around for as long as
+    // anything might still be reading it (a static/global works well).
+    AgcStep(int sampleRate, std::atomic<float>* gainOutputDb = nullptr);
     virtual ~AgcStep();
-    
+
     virtual int getInputSampleRate() const FREEDV_NONBLOCKING override;
     virtual int getOutputSampleRate() const FREEDV_NONBLOCKING override;
     virtual short* execute(short* inputSamples, int numInputSamples, int* numOutputSamples) FREEDV_NONBLOCKING override;
     virtual void reset() FREEDV_NONBLOCKING override;
-    
+
 private:
     int sampleRate_;
     float targetGainDb_;
@@ -65,6 +74,8 @@ private:
     GenericFIFO<short> inputSampleFifo_;
     std::unique_ptr<short[]> outputSamples_;
     std::unique_ptr<short[]> tmpInput_;
+
+    std::atomic<float>* gainOutputDb_;
 };
 
 
