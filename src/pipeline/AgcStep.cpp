@@ -44,9 +44,9 @@
 // AGC settings
 constexpr float AGC_LOUDNESS_TARGET_LUFS = -23.0;
 constexpr float AGC_MAX_GAIN_DB = 12.0;
-constexpr float AGC_MIN_GAIN_DB = -20.0;
-constexpr float AGC_ATTACK_TIME_SEC = 0.5;
-constexpr float AGC_RELEASE_TIME_SEC = 6.0;
+constexpr float AGC_MIN_GAIN_DB = -12.0;
+constexpr float AGC_ATTACK_RATE_DB_PER_SEC = 1;
+constexpr float AGC_DECAY_RATE_DB_PER_SEC = 1;
 constexpr float SILENCE_THRESHOLD_LUFS = -33.0;
 constexpr int LIMITER_LEVEL_DB = -1;
 
@@ -132,6 +132,15 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
             *numOutputSamples += numSamplesPerRun_;
             inputSampleFifo_.read(tmpInput, numSamplesPerRun_);
 
+            // Run WebRTC to make sure we don't clip.
+            int outMicLevel = 0;
+            int inMicLevel = 0;
+            short echo = 0;
+            unsigned char saturationWarning = 1;
+            WebRtcAgc_Process(
+                agcState_, const_cast<const int16_t *const *>(&tmpInput), 1, numSamplesPerRun_, 
+                const_cast<int16_t *const *>(&tmpOutput), inMicLevel, &outMicLevel, echo, &saturationWarning);
+
             // Step 1: feed samples into ebur128 and return current
             // loudness in LUFS.
             double lufs = 0.0;
@@ -155,11 +164,16 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
                 float agcInterval = 0;
                 if (targetGainDb_ < currentGainDb_)
                 {
-                    agcInterval = AGC_ATTACK_TIME_SEC;
+                    agcInterval = AGC_ATTACK_RATE_DB_PER_SEC;
                 }
                 else
                 {
-                    agcInterval = AGC_RELEASE_TIME_SEC;
+                    agcInterval = AGC_DECAY_RATE_DB_PER_SEC;
+                }
+                currentGainDb_ += agcInterval * ((float)numSamplesPerRun_ / sampleRate_);
+                if (abs(currentGainDb_) > abs(targetGainDb_))
+                {
+                    currentGainDb_ = targetGainDb_;
                 }
                 currentGainDb_ += ((targetGainDb_ - currentGainDb_) / agcInterval) * ((float)numSamplesPerRun_ / sampleRate_);
             }
@@ -174,14 +188,6 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
                 ConvertSingleSampleToIntSampleType_<short, float>(&temp, &tmpInput[ctr]);
             }
 
-            // Run WebRTC to make sure we don't clip.
-            int outMicLevel = 0;
-            int inMicLevel = 0;
-            short echo = 0;
-            unsigned char saturationWarning = 1;
-            WebRtcAgc_Process(
-                agcState_, const_cast<const int16_t *const *>(&tmpInput), 1, numSamplesPerRun_, 
-                const_cast<int16_t *const *>(&tmpOutput), inMicLevel, &outMicLevel, echo, &saturationWarning);
             tmpOutput += numSamplesPerRun_;
         }
     }
@@ -191,7 +197,6 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
 
 void AgcStep::reset() FREEDV_NONBLOCKING
 {
-    inputSampleFifo_.reset();
     currentGainDb_ = 0;
     targetGainDb_ = 0;
 }
