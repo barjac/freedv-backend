@@ -132,15 +132,6 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
             *numOutputSamples += numSamplesPerRun_;
             inputSampleFifo_.read(tmpInput, numSamplesPerRun_);
 
-            // Run WebRTC to make sure we don't clip.
-            int outMicLevel = 0;
-            int inMicLevel = 0;
-            short echo = 0;
-            unsigned char saturationWarning = 1;
-            WebRtcAgc_Process(
-                agcState_, const_cast<const int16_t *const *>(&tmpInput), 1, numSamplesPerRun_, 
-                const_cast<int16_t *const *>(&tmpOutput), inMicLevel, &outMicLevel, echo, &saturationWarning);
-
             // Step 1: feed samples into ebur128 and return current
             // loudness in LUFS.
             double lufs = 0.0;
@@ -187,6 +178,15 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
                 temp *= scaleFactor;
                 ConvertSingleSampleToIntSampleType_<short, float>(&temp, &tmpInput[ctr]);
             }
+
+            // Run WebRTC to make sure we don't clip.
+            int outMicLevel = 0;
+            int inMicLevel = 0;
+            short echo = 0;
+            unsigned char saturationWarning = 1;
+            WebRtcAgc_Process(
+                agcState_, const_cast<const int16_t *const *>(&tmpInput), 1, numSamplesPerRun_, 
+                const_cast<int16_t *const *>(&tmpOutput), inMicLevel, &outMicLevel, echo, &saturationWarning);
 
             tmpOutput += numSamplesPerRun_;
         }
