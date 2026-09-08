@@ -45,7 +45,7 @@
 constexpr float AGC_LOUDNESS_TARGET_LUFS = -23.0;
 constexpr float AGC_MAX_GAIN_DB = 12.0;
 constexpr float AGC_MIN_GAIN_DB = -12.0;
-constexpr float AGC_ATTACK_RATE_DB_PER_SEC = 1;
+constexpr float AGC_ATTACK_RATE_DB_PER_SEC = -1;
 constexpr float AGC_DECAY_RATE_DB_PER_SEC = 1;
 constexpr float SILENCE_THRESHOLD_LUFS = -33.0;
 constexpr int LIMITER_LEVEL_DB = -1;
@@ -162,7 +162,7 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
                     agcInterval = AGC_DECAY_RATE_DB_PER_SEC;
                 }
                 currentGainDb_ += agcInterval * ((float)numSamplesPerRun_ / sampleRate_);
-                if (abs(currentGainDb_) > abs(targetGainDb_))
+                if (std::abs(currentGainDb_) > std::abs(targetGainDb_))
                 {
                     currentGainDb_ = targetGainDb_;
                 }
@@ -196,6 +196,5 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
 
 void AgcStep::reset() FREEDV_NONBLOCKING
 {
-    currentGainDb_ = 0;
-    targetGainDb_ = 0;
+    inputSampleFifo_.reset();
 }
