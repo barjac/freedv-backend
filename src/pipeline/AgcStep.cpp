@@ -62,6 +62,7 @@ AgcStep::AgcStep(int sampleRate, std::atomic<float>* gainOutputDb)
     , inputSampleFifo_(MAX_AGC_SAMPLES + 1)
     , gainOutputDb_(gainOutputDb)
     , diagLogFile_(nullptr)
+    , diagLogSampleCount_(0)
 {
     numSamplesPerRun_ = std::min(MAX_AGC_SAMPLES, sampleRate_ / TEN_MS_DIVIDER); // 10ms blocks, 160 max samples
     assert(numSamplesPerRun_ > 0);
@@ -112,7 +113,6 @@ AgcStep::AgcStep(int sampleRate, std::atomic<float>* gainOutputDb)
             fflush(diagLogFile_);
         }
     }
-    diagLogStartTime_ = std::chrono::steady_clock::now();
 }
 
 AgcStep::~AgcStep()
@@ -223,12 +223,12 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
                 outputRms = std::sqrt(outputRms / numSamplesPerRun_);
                 double outputDbfs = outputRms > 0.0 ? 20.0 * std::log10(outputRms) : -100.0;
 
-                auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - diagLogStartTime_).count();
+                diagLogSampleCount_ += numSamplesPerRun_;
+                long long elapsedMs = (diagLogSampleCount_ * 1000LL) / sampleRate_;
 
                 FREEDV_BEGIN_VERIFIED_SAFE
                 fprintf(diagLogFile_, "%lld,%.2f,%.2f,%.2f,%.2f\n",
-                    (long long)elapsedMs,
+                    elapsedMs,
                     (result == EBUR128_SUCCESS && lufs != -HUGE_VAL) ? lufs : -100.0,
                     targetGainDb_, currentGainDb_, outputDbfs);
                 fflush(diagLogFile_);
