@@ -41,7 +41,6 @@
 
 #include <memory>
 #include <cstdio>
-#include <chrono>
 
 class AgcStep : public IPipelineStep
 {
@@ -74,8 +73,25 @@ private:
     // production use -- see the bcj-agc-diagnostic-log branch. Only this
     // step's own single owning thread ever calls execute(), so no locking
     // is needed around this file handle.
+    //
+    // diagLogSampleCount_ is a running count of audio samples processed,
+    // used to timestamp each row by its position in the audio stream
+    // (sample count * 1000 / sampleRate_) rather than by wall-clock time --
+    // execute() gets called in bursts of several 10ms blocks at once
+    // (whenever the upstream pipeline hands over a chunk), not one block
+    // per 10ms of real elapsed time, so a wall-clock timestamp stamped
+    // several genuinely-sequential blocks from one burst with the same (or
+    // near-identical) millisecond, while the next burst's first block jumps
+    // the timestamp forward by the whole inter-burst gap. Plotted with
+    // lines, that produced clusters of points stacked at nearly the same x
+    // position (a real value spread of ~10dB within one burst was seen)
+    // joined by long diagonal connectors to the next cluster -- looking
+    // like a row of vertical lines joined by sloping lines, not the smooth
+    // audio-time trace intended. An audio-sample-based timestamp is exactly
+    // 10ms apart for every row regardless of when the CPU got around to
+    // writing it, so this can't happen.
     FILE* diagLogFile_;
-    std::chrono::steady_clock::time_point diagLogStartTime_;
+    long long diagLogSampleCount_;
 };
 
 
