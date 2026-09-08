@@ -166,7 +166,6 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
                 {
                     currentGainDb_ = targetGainDb_;
                 }
-                currentGainDb_ += ((targetGainDb_ - currentGainDb_) / agcInterval) * ((float)numSamplesPerRun_ / sampleRate_);
             }
 
             // Scale samples based on current gain.
