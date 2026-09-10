@@ -44,7 +44,7 @@
 #include <assert.h>
 
 // AGC settings
-constexpr float AGC_LOUDNESS_TARGET_LUFS = -24.0;
+constexpr float AGC_LOUDNESS_TARGET_LUFS = -26.0;
 constexpr float AGC_MAX_GAIN_DB = 12.0;
 constexpr float AGC_MIN_GAIN_DB = -20.0;
 constexpr float AGC_ATTACK_TIME_SEC = 2.0;
