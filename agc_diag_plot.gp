@@ -30,7 +30,7 @@ datafile = system("echo $HOME") . "/agc_diag.csv"
 # versions of it). A single process, refreshing synchronously right
 # before reading, has no concurrent writer and so cannot have this
 # problem at all.
-window_file = system("echo $HOME") . "/agc_diag_window.csv"
+window_file = system("echo $HOME") . "/freedv-data/agc_diag_window.csv"
 
 # Sized wide and tall enough that three stacked panels are each still
 # readable -- the default wxt window is far too small for a 3-row
