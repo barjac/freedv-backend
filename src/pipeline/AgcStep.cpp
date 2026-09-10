@@ -109,7 +109,7 @@ AgcStep::AgcStep(int sampleRate, std::atomic<float>* gainOutputDb)
         diagLogFile_ = fopen(path.c_str(), "w");
         if (diagLogFile_ != nullptr)
         {
-            fprintf(diagLogFile_, "elapsed_ms,input_lufs,target_gain_db,current_gain_db,output_dbfs\n");
+            fprintf(diagLogFile_, "elapsed_ms,input_lufs,target_gain_db,current_gain_db,output_dbfs,input_dbfs\n");
             fflush(diagLogFile_);
         }
     }
@@ -155,6 +155,27 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
         {
             *numOutputSamples += numSamplesPerRun_;
             inputSampleFifo_.read(tmpInput, numSamplesPerRun_);
+
+            // DIAGNOSTIC ONLY: raw pre-AGC input level, computed from
+            // tmpInput before the gain-scale loop below overwrites it in
+            // place. Same simple per-block RMS as output_dbfs below,
+            // deliberately NOT routed through ebur128 -- a genuine
+            // instantaneous level, comparable on equal terms to
+            // output_dbfs, unlike input_lufs (which is a K-weighted,
+            // 400ms-integrated loudness metric driving the AGC's own
+            // control loop, not a level monitor).
+            double inputDbfs = -100.0;
+            if (diagLogFile_ != nullptr)
+            {
+                double inputRms = 0.0;
+                for (int ctr = 0; ctr < numSamplesPerRun_; ctr++)
+                {
+                    double s = tmpInput[ctr] / 32768.0;
+                    inputRms += s * s;
+                }
+                inputRms = std::sqrt(inputRms / numSamplesPerRun_);
+                inputDbfs = inputRms > 0.0 ? 20.0 * std::log10(inputRms) : -100.0;
+            }
 
             // Step 1: feed samples into ebur128 and return current
             // loudness in LUFS.
@@ -227,10 +248,10 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
                 long long elapsedMs = (diagLogSampleCount_ * 1000LL) / sampleRate_;
 
                 FREEDV_BEGIN_VERIFIED_SAFE
-                fprintf(diagLogFile_, "%lld,%.2f,%.2f,%.2f,%.2f\n",
+                fprintf(diagLogFile_, "%lld,%.2f,%.2f,%.2f,%.2f,%.2f\n",
                     elapsedMs,
                     (result == EBUR128_SUCCESS && lufs != -HUGE_VAL) ? lufs : -100.0,
-                    targetGainDb_, currentGainDb_, outputDbfs);
+                    targetGainDb_, currentGainDb_, outputDbfs, inputDbfs);
                 fflush(diagLogFile_);
                 FREEDV_END_VERIFIED_SAFE
             }
