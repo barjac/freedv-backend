@@ -58,8 +58,8 @@ AgcStep::AgcStep(int sampleRate, bool enableLimiter, bool enableLeveler)
     , targetGainDb_(0.0)
     , currentGainDb_(0.0)
     , inputSampleFifo_(MAX_AGC_SAMPLES + 1)
-    , enableLimiter_(enableLimiter_)
-    , enableLeveler_(enableLeveler_)
+    , enableLimiter_(enableLimiter)
+    , enableLeveler_(enableLeveler)
 {
     numSamplesPerRun_ = std::min(MAX_AGC_SAMPLES, sampleRate_ / TEN_MS_DIVIDER); // 10ms blocks, 160 max samples
     assert(numSamplesPerRun_ > 0);
@@ -196,7 +196,7 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
             }
             else
             {
-                memcpy(tmpOutput, tmpInput, numSamplesPerRun_);
+                memcpy(tmpOutput, tmpInput, numSamplesPerRun_ * sizeof(short));
             }
 
             tmpOutput += numSamplesPerRun_;
