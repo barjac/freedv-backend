@@ -53,11 +53,13 @@ constexpr int LIMITER_LEVEL_DB = -1;
 constexpr int TEN_MS_DIVIDER = 100;
 constexpr int MAX_AGC_SAMPLES = 160;
 
-AgcStep::AgcStep(int sampleRate)
+AgcStep::AgcStep(int sampleRate, bool enableLimiter, bool enableLeveler)
     : sampleRate_(sampleRate == 8000 || sampleRate == 16000 || sampleRate == 32000 || sampleRate == 48000 ? sampleRate : 48000)
     , targetGainDb_(0.0)
     , currentGainDb_(0.0)
     , inputSampleFifo_(MAX_AGC_SAMPLES + 1)
+    , enableLimiter_(enableLimiter_)
+    , enableLeveler_(enableLeveler_)
 {
     numSamplesPerRun_ = std::min(MAX_AGC_SAMPLES, sampleRate_ / TEN_MS_DIVIDER); // 10ms blocks, 160 max samples
     assert(numSamplesPerRun_ > 0);
@@ -132,60 +134,70 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
             *numOutputSamples += numSamplesPerRun_;
             inputSampleFifo_.read(tmpInput, numSamplesPerRun_);
 
-            // Step 1: feed samples into ebur128 and return current
-            // loudness in LUFS.
-            double lufs = 0.0;
-
-            // Note: libebur128 is unlikely to use RT-unsafe constructs in normal operation
-            // (per existing RTSan-enabled tests). Verified on 2025-09-30.
-            FREEDV_BEGIN_VERIFIED_SAFE
-            ebur128_add_frames_short(state, tmpInput, numSamplesPerRun_);
-            auto result = ebur128_loudness_momentary(state, &lufs);
-            FREEDV_END_VERIFIED_SAFE
-
-            if (result == EBUR128_SUCCESS && lufs != -HUGE_VAL && lufs > SILENCE_THRESHOLD_LUFS)
+            if (enableLeveler_)
             {
-                // Returned loudness is valid.
-                // Step 2: calculate target gain. Assume LUFS = dbFS (?)
-                targetGainDb_ = AGC_LOUDNESS_TARGET_LUFS - lufs;
-                if (targetGainDb_ >= AGC_MAX_GAIN_DB) targetGainDb_ = AGC_MAX_GAIN_DB;
-                if (targetGainDb_ <= AGC_MIN_GAIN_DB) targetGainDb_ = AGC_MIN_GAIN_DB;
-
-                // Step 3: increment/decrement current gain in the direction of target.
-                float agcInterval = 0;
-                if (targetGainDb_ < currentGainDb_)
+                // Step 1: feed samples into ebur128 and return current
+                // loudness in LUFS.
+                double lufs = 0.0;
+    
+                // Note: libebur128 is unlikely to use RT-unsafe constructs in normal operation
+                // (per existing RTSan-enabled tests). Verified on 2025-09-30.
+                FREEDV_BEGIN_VERIFIED_SAFE
+                ebur128_add_frames_short(state, tmpInput, numSamplesPerRun_);
+                auto result = ebur128_loudness_momentary(state, &lufs);
+                FREEDV_END_VERIFIED_SAFE
+    
+                if (result == EBUR128_SUCCESS && lufs != -HUGE_VAL && lufs > SILENCE_THRESHOLD_LUFS)
                 {
-                    agcInterval = AGC_ATTACK_RATE_DB_PER_SEC;
+                    // Returned loudness is valid.
+                    // Step 2: calculate target gain. Assume LUFS = dbFS (?)
+                    targetGainDb_ = AGC_LOUDNESS_TARGET_LUFS - lufs;
+                    if (targetGainDb_ >= AGC_MAX_GAIN_DB) targetGainDb_ = AGC_MAX_GAIN_DB;
+                    if (targetGainDb_ <= AGC_MIN_GAIN_DB) targetGainDb_ = AGC_MIN_GAIN_DB;
+    
+                    // Step 3: increment/decrement current gain in the direction of target.
+                    float agcInterval = 0;
+                    if (targetGainDb_ < currentGainDb_)
+                    {
+                        agcInterval = AGC_ATTACK_RATE_DB_PER_SEC;
+                    }
+                    else
+                    {
+                        agcInterval = AGC_DECAY_RATE_DB_PER_SEC;
+                    }
+                    currentGainDb_ += agcInterval * ((float)numSamplesPerRun_ / sampleRate_);
+                    if (std::abs(currentGainDb_) > std::abs(targetGainDb_))
+                    {
+                        currentGainDb_ = targetGainDb_;
+                    }
                 }
-                else
+    
+                // Scale samples based on current gain.
+                float scaleFactor = expf(currentGainDb_/20.0f * logf(10.0f));
+                float temp = 0;
+                for (auto ctr = 0; ctr < numSamplesPerRun_; ctr++)
                 {
-                    agcInterval = AGC_DECAY_RATE_DB_PER_SEC;
+                    ConvertSingleSampleToFloatSampleType_<float, short>(&tmpInput[ctr], &temp);
+                    temp *= scaleFactor;
+                    ConvertSingleSampleToIntSampleType_<short, float>(&temp, &tmpInput[ctr]);
                 }
-                currentGainDb_ += agcInterval * ((float)numSamplesPerRun_ / sampleRate_);
-                if (std::abs(currentGainDb_) > std::abs(targetGainDb_))
-                {
-                    currentGainDb_ = targetGainDb_;
-                }
-            }
-
-            // Scale samples based on current gain.
-            float scaleFactor = expf(currentGainDb_/20.0f * logf(10.0f));
-            float temp = 0;
-            for (auto ctr = 0; ctr < numSamplesPerRun_; ctr++)
-            {
-                ConvertSingleSampleToFloatSampleType_<float, short>(&tmpInput[ctr], &temp);
-                temp *= scaleFactor;
-                ConvertSingleSampleToIntSampleType_<short, float>(&temp, &tmpInput[ctr]);
             }
 
             // Run WebRTC to make sure we don't clip.
-            int outMicLevel = 0;
-            int inMicLevel = 0;
-            short echo = 0;
-            unsigned char saturationWarning = 1;
-            WebRtcAgc_Process(
-                agcState_, const_cast<const int16_t *const *>(&tmpInput), 1, numSamplesPerRun_, 
-                const_cast<int16_t *const *>(&tmpOutput), inMicLevel, &outMicLevel, echo, &saturationWarning);
+            if (enableLimiter_)
+            {
+                int outMicLevel = 0;
+                int inMicLevel = 0;
+                short echo = 0;
+                unsigned char saturationWarning = 1;
+                WebRtcAgc_Process(
+                    agcState_, const_cast<const int16_t *const *>(&tmpInput), 1, numSamplesPerRun_, 
+                    const_cast<int16_t *const *>(&tmpOutput), inMicLevel, &outMicLevel, echo, &saturationWarning);
+            }
+            else
+            {
+                memcpy(tmpOutput, tmpInput, numSamplesPerRun_);
+            }
 
             tmpOutput += numSamplesPerRun_;
         }
