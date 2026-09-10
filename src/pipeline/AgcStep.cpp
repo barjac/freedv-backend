@@ -109,7 +109,7 @@ AgcStep::AgcStep(int sampleRate, std::atomic<float>* gainOutputDb)
         diagLogFile_ = fopen(path.c_str(), "w");
         if (diagLogFile_ != nullptr)
         {
-            fprintf(diagLogFile_, "elapsed_ms,input_lufs,target_gain_db,current_gain_db,output_dbfs,input_dbfs\n");
+            fprintf(diagLogFile_, "elapsed_ms,input_lufs,target_gain_db,current_gain_db,output_dbfs,input_dbfs,post_leveller_dbfs\n");
             fflush(diagLogFile_);
         }
     }
@@ -219,6 +219,24 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
                 ConvertSingleSampleToIntSampleType_<short, float>(&temp, &tmpInput[ctr]);
             }
 
+            // TEMPORARY DIAGNOSTIC: level right after the leveller's own
+            // gain multiply above, but before the WebRTC limiter runs --
+            // isolates how much each of the two stages actually changes
+            // the level, to find where the input-vs-output gap seen at
+            // currentGainDb_==0 is coming from. Remove once answered.
+            double postLevellerDbfs = -100.0;
+            if (diagLogFile_ != nullptr)
+            {
+                double postLevellerRms = 0.0;
+                for (int ctr = 0; ctr < numSamplesPerRun_; ctr++)
+                {
+                    double s = tmpInput[ctr] / 32768.0;
+                    postLevellerRms += s * s;
+                }
+                postLevellerRms = std::sqrt(postLevellerRms / numSamplesPerRun_);
+                postLevellerDbfs = postLevellerRms > 0.0 ? 20.0 * std::log10(postLevellerRms) : -100.0;
+            }
+
             // Run WebRTC to make sure we don't clip.
             int outMicLevel = 0;
             int inMicLevel = 0;
@@ -248,10 +266,10 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
                 long long elapsedMs = (diagLogSampleCount_ * 1000LL) / sampleRate_;
 
                 FREEDV_BEGIN_VERIFIED_SAFE
-                fprintf(diagLogFile_, "%lld,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+                fprintf(diagLogFile_, "%lld,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
                     elapsedMs,
                     (result == EBUR128_SUCCESS && lufs != -HUGE_VAL) ? lufs : -100.0,
-                    targetGainDb_, currentGainDb_, outputDbfs, inputDbfs);
+                    targetGainDb_, currentGainDb_, outputDbfs, inputDbfs, postLevellerDbfs);
                 fflush(diagLogFile_);
                 FREEDV_END_VERIFIED_SAFE
             }
