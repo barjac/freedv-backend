@@ -46,7 +46,12 @@
 // smoothly under EBU R128's silence-gating than a fixed dB/sec ramp.
 constexpr float LEVELER_TARGET_LUFS = -23.0f;
 constexpr float LEVELER_GAIN_LIMIT_DB = 12.0f; // symmetric +/-12dB per spec
-constexpr float LEVELER_TIME_CONSTANT_SEC = 10.0f; // starting recommendation, tune via live A/B testing
+// 2.0s, per Barry's own prior live-tuning history on the old AgcStep (2026-09-15
+// clarification): 0.5s/6.0s asymmetric -> symmetric 3.0s/3.0s (confirmed
+// on-air, backend commit 4f59d0b) -> a later refinement down to symmetric
+// 2.0s/2.0s, which supersedes the 3.0s value. Not re-derived from scratch for
+// this redesign; carried forward as the known-good starting point.
+constexpr float LEVELER_TIME_CONSTANT_SEC = 2.0f;
 constexpr float SILENCE_THRESHOLD_LUFS = -33.0f;
 
 constexpr int TEN_MS_DIVIDER = 100;
