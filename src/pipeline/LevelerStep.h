@@ -1,8 +1,9 @@
 //=========================================================================
-// Name:            AgcStep.h
-// Purpose:         Describes an AGC step in the audio pipeline.
+// Name:            LevelerStep.h
+// Purpose:         Describes a loudness leveler step in the audio pipeline.
 //
-// Authors:         Mooneer Salem
+// Authors:         Claude Code (for Barry Jones, G4MKT), design from
+//                  g4dya (Richard)'s spec on PR #1472
 // License:
 //
 // All rights reserved.
@@ -32,40 +33,39 @@
 //
 //=========================================================================
 
-#ifndef AUDIO_PIPELINE__AGC_STEP_H
-#define AUDIO_PIPELINE__AGC_STEP_H
-
-#include "IPipelineStep.h"
-#include "../util/GenericFIFO.h"
-#include "../3rdparty/WebRTC_AGC/agc.h"
+#ifndef AUDIO_PIPELINE__LEVELER_STEP_H
+#define AUDIO_PIPELINE__LEVELER_STEP_H
 
 #include <memory>
 
-class AgcStep : public IPipelineStep
+#include "IPipelineStep.h"
+#include "../util/realtime_fp.h"
+#include "../util/DiagnosticCsvLogger.h"
+
+// Loudness leveler: slow (multi-second, symmetric) gain toward a target
+// LUFS, driven by feedback of the *downstream* CompressorLimiterStep's
+// measured output loudness (not this step's own input) -- see the
+// "Replace AgcStep with a Leveler + Compressor/Limiter pair" plan's
+// Architecture section for why. Must be constructed and wired downstream
+// of a CompressorLimiterStep in the same pipeline.
+class LevelerStep : public IPipelineStep
 {
 public:
-    AgcStep(int sampleRate);
-    virtual ~AgcStep();
-    
+    LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger);
+    virtual ~LevelerStep();
+
     virtual int getInputSampleRate() const FREEDV_NONBLOCKING override;
     virtual int getOutputSampleRate() const FREEDV_NONBLOCKING override;
     virtual short* execute(short* inputSamples, int numInputSamples, int* numOutputSamples) FREEDV_NONBLOCKING override;
     virtual void reset() FREEDV_NONBLOCKING override;
-    
+
 private:
     int sampleRate_;
+    realtime_fp<float()> feedbackLoudnessLufsFn_;
     float targetGainDb_;
     float currentGainDb_;
-    WebRtcAgcConfig agcConfig_;
-    void* agcState_;
-
-    void* ebur128State_;
-
-    int numSamplesPerRun_;
-    GenericFIFO<short> inputSampleFifo_;
     std::unique_ptr<short[]> outputSamples_;
-    std::unique_ptr<short[]> tmpInput_;
+    std::shared_ptr<DiagnosticCsvLogger> diagLogger_;
 };
 
-
-#endif // AUDIO_PIPELINE__AGC_STEP_H
+#endif // AUDIO_PIPELINE__LEVELER_STEP_H

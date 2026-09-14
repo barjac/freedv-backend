@@ -13,6 +13,8 @@ else(APPLE)
 endif(APPLE)
 
 add_library(fdv_util STATIC
+    DiagnosticCsvLogger.cpp
+    LoudnessMeter.cpp
     Semaphore.cpp
     SocketIoClient.cpp
     ${THREADED_OBJECT_FILES}
@@ -25,7 +27,7 @@ add_library(fdv_util STATIC
 )
 
 target_compile_options(fdv_util PRIVATE ${WARNINGS_AS_ERRORS_FLAGS})
-target_link_libraries(fdv_util yyjson fdv_os_wrapper)
+target_link_libraries(fdv_util yyjson fdv_os_wrapper ${LIBEBUR128})
 if(WIN32)
     target_link_libraries(fdv_util iphlpapi)
 endif(WIN32)
