@@ -37,6 +37,7 @@
 
 #include "IPipelineStep.h"
 #include "../util/GenericFIFO.h"
+#include "../util/realtime_fp.h"
 
 #include <memory>
 #include "rnnoise.h"
@@ -44,19 +45,20 @@
 class RNNoiseStep : public IPipelineStep
 {
 public:
-    RNNoiseStep();
+    RNNoiseStep(realtime_fp<float()> const& wetMixFn);
     virtual ~RNNoiseStep();
-    
+
     virtual int getInputSampleRate() const FREEDV_NONBLOCKING override;
     virtual int getOutputSampleRate() const FREEDV_NONBLOCKING override;
     virtual short* execute(short* inputSamples, int numInputSamples, int* numOutputSamples) FREEDV_NONBLOCKING override;
     virtual void reset() FREEDV_NONBLOCKING override;
-    
+
 private:
     DenoiseState* rnnoise_;
     bool firstFrame_;
     GenericFIFO<short> inputSampleFifo_;
     std::unique_ptr<short[]> outputSamples_;
+    realtime_fp<float()> wetMixFn_;
 };
 
 
