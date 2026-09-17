@@ -91,7 +91,7 @@ void MinimalTxRxThread::initializePipeline_()
             txStep_->getInputSampleRate(),
             +[]() FREEDV_NONBLOCKING { return CompressorLimiterStep::getLastOutputLoudnessLufs(); },
             diagLogger);
-        auto rnnoiseStep = new RNNoiseStep(+[]() FREEDV_NONBLOCKING { return 1.0f; });
+        auto rnnoiseStep = new RNNoiseStep();
         pipeline_->appendPipelineStep(rnnoiseStep);
         pipeline_->appendPipelineStep(levelerStep);
         pipeline_->appendPipelineStep(compressorLimiterStep);

@@ -39,15 +39,13 @@
 
 #include <limits.h>
 #include <assert.h>
-#include <string.h>
 
 #define RNNOISE_SAMPLE_RATE (48000)
 #define RNNOISE_FRAME_SIZE (480) /* 1ms */
 
-RNNoiseStep::RNNoiseStep(realtime_fp<float()> const& wetMixFn)
+RNNoiseStep::RNNoiseStep()
     : firstFrame_(true)
     , inputSampleFifo_(RNNOISE_FRAME_SIZE + 1)
-    , wetMixFn_(wetMixFn)
 {
     rnnoise_ = rnnoise_create(nullptr);
     assert(rnnoise_ != nullptr);
@@ -92,27 +90,11 @@ short* RNNoiseStep::execute(short* inputSamples, int numInputSamples, int* numOu
             float tmpFloat[RNNOISE_FRAME_SIZE];
             ConvertToFloatSampleType_<float, short, 1>(tmpOutput, tmpFloat, RNNOISE_FRAME_SIZE);
 
-            float mix = wetMixFn_();
-            float tmpDryFloat[RNNOISE_FRAME_SIZE];
-            if (mix < 1.0f)
-            {
-                memcpy(tmpDryFloat, tmpFloat, sizeof(tmpDryFloat));
-            }
-
             // Note: RNNoise is unlikely to use RT-unsafe constructs in normal operation
             // (per existing RTSan-enabled tests). Verified on 2025-09-30.
             FREEDV_BEGIN_VERIFIED_SAFE
             rnnoise_process_frame(rnnoise_, tmpFloat, tmpFloat);
             FREEDV_END_VERIFIED_SAFE
-
-            if (mix < 1.0f)
-            {
-                float dryMix = 1.0f - mix;
-                for (int index = 0; index < RNNOISE_FRAME_SIZE; index++)
-                {
-                    tmpFloat[index] = mix * tmpFloat[index] + dryMix * tmpDryFloat[index];
-                }
-            }
 
             if (!firstFrame_)
             {
