@@ -40,18 +40,27 @@
 
 #include "CompressorLimiterStep.h"
 
-// Knee 1 ("compressor"): starting recommendation only, tune via live A/B
-// testing. Pushed close to the ceiling rather than spread across a wide
-// range -- Important constraint (Barry, 2026-09-15): RADE's neural encoder
-// was almost certainly trained on uncompressed speech, so this threshold
-// must sit well above where normal/loud (but not clipping-adjacent) speech
-// actually peaks, so this stage effectively never engages during ordinary
-// speech -- verify empirically that normal speech shows ~0dB reduction
-// here, and raise the threshold further if real testing shows otherwise.
-constexpr float KNEE1_THRESHOLD_DB = -6.0f;
-constexpr float KNEE1_RATIO = 2.0f;
-constexpr float KNEE1_WIDTH_DB = 6.0f;
-
+// Knee 1 ("compressor") removed, 2026-09-18: LevelerStep's feedback is
+// measured on this step's *output*, i.e. after gain reduction has already
+// been applied -- a deliberate closed-loop design (Richard's spec) so the
+// leveler reacts to whatever this stage actually does. But knee 1's gain
+// reduction is a one-directional bias the leveler has no way to see
+// through: LevelerStep backs out its own applied gain to estimate the
+// input level, but has no way to also back out this stage's reduction, so
+// every dB of reduction here reads to the leveler as "the input just got
+// quieter" -- pushing it to ask for *more* gain in response, which this
+// stage then has to fight right back down. Confirmed live (2026-09-18):
+// knee 1 was engaging on ~40% of rows for loud input (each engagement
+// >=0dB by construction, so the bias is always upward, never cancels out
+// on average), and that engagement percentage tracked almost exactly with
+// how far a test's measured output loudness overshot the -23 LUFS target.
+// Barry's call: removing knee 1 keeps the feedback loop meaningful (it
+// still reacts to knee 2's real, if rare, action) while making that bias
+// negligible in practice, rather than hiding any stage's action from the
+// loop (which would defeat the loop's purpose) or replacing the whole
+// stage with something unproven (e.g. Mooneer's cubic soft-clipper --
+// PR #49 -- has its own known issues, not adopted here, not yet tested).
+//
 // Knee 2 ("limiter"): reuses AgcStep's old ~-1 to -2dBFS ceiling precedent,
 // near-infinite ratio, tighter knee for a sharper (but still soft, per
 // spec) transition into brickwall-like behavior right at the ceiling.
@@ -181,9 +190,9 @@ short* CompressorLimiterStep::execute(short* inputSamples, int numInputSamples, 
             float absVal = std::fabs(currentSample);
             float levelDb = absVal > 0.0f ? 20.0f * log10f(absVal) : LEVEL_FLOOR_DB;
 
-            // Step 2: static two-knee soft-knee gain curve, applied in series.
-            float knee1OutDb = softKneeGainDb(levelDb, KNEE1_THRESHOLD_DB, KNEE1_RATIO, KNEE1_WIDTH_DB);
-            float knee2OutDb = softKneeGainDb(knee1OutDb, KNEE2_THRESHOLD_DB, KNEE2_RATIO, KNEE2_WIDTH_DB);
+            // Step 2: static soft-knee gain curve (knee 2/"limiter" only --
+            // see the removed knee 1's comment above).
+            float knee2OutDb = softKneeGainDb(levelDb, KNEE2_THRESHOLD_DB, KNEE2_RATIO, KNEE2_WIDTH_DB);
             float staticGainReductionDb = knee2OutDb - levelDb; // <= 0
 
             // Step 3: smooth the *gain-reduction command* (not the level),

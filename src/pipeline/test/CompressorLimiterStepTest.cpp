@@ -60,10 +60,9 @@ double measurePeakDbfs(const std::vector<short>& samples, std::size_t startIndex
 
 } // namespace
 
-// A signal well below knee 1's threshold (-6dBFS starting recommendation)
-// should pass through with ~0dB gain reduction -- the RADE-encoder-safety
-// constraint (Barry, 2026-09-15): ordinary/quiet speech must not be
-// measurably compressed.
+// A signal well below the limiter's threshold should pass through with
+// ~0dB gain reduction -- the RADE-encoder-safety constraint (Barry,
+// 2026-09-15): ordinary/quiet speech must not be measurably compressed.
 bool compressorLimiterLeavesQuietSignalUnaffected()
 {
     constexpr int sampleRate = 8000;
@@ -71,7 +70,7 @@ bool compressorLimiterLeavesQuietSignalUnaffected()
 
     CompressorLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>());
 
-    double amplitude = 32767.0 * std::pow(10.0, -20.0 / 20.0); // -20dBFS peak, well below -6dBFS knee 1
+    double amplitude = 32767.0 * std::pow(10.0, -20.0 / 20.0); // -20dBFS peak, well below the limiter's threshold
     auto input = generateSineWave(amplitude, 1000.0, 1.0, sampleRate);
     auto output = runThroughStep(step, input, sampleRate / 10);
 
@@ -88,9 +87,9 @@ bool compressorLimiterLeavesQuietSignalUnaffected()
     return true;
 }
 
-// A signal at full scale (well above both knees) should be pulled down
-// meaningfully once the envelope follower settles -- confirms the limiter
-// actually engages rather than just being a pass-through.
+// A signal at full scale (well above the limiter's threshold) should be
+// pulled down meaningfully once the envelope follower settles -- confirms
+// the limiter actually engages rather than just being a pass-through.
 bool compressorLimiterReducesGainForLoudSignal()
 {
     constexpr int sampleRate = 8000;

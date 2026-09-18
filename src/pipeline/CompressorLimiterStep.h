@@ -44,16 +44,28 @@
 #include "../util/LoudnessMeter.h"
 #include "../util/DiagnosticCsvLogger.h"
 
-// Soft-knee compressor/limiter, replacing WebRtcAgc_Process (which turned
-// out to be a hardcoded ~3:1 compressor with hidden makeup gain, not a
-// limiter -- see the "Replace AgcStep with a Leveler + Compressor/Limiter
-// pair" plan). Runs a genuine per-sample envelope follower with a short
-// (~3-5ms) look-ahead delay line, applying two soft-knee gain stages in
-// series (a gentle "compressor" knee pushed close to the ceiling, then a
-// near-infinite-ratio "limiter" knee right at it) so it only ever engages
-// on genuinely loud excursions near clipping, never on ordinary speech --
-// important because RADE's neural encoder was almost certainly trained on
+// Soft-knee limiter, replacing WebRtcAgc_Process (which turned out to be a
+// hardcoded ~3:1 compressor with hidden makeup gain, not a limiter -- see
+// the "Replace AgcStep with a Leveler + Compressor/Limiter pair" plan).
+// Runs a genuine per-sample envelope follower with a short (~3-5ms)
+// look-ahead delay line, applying a single near-infinite-ratio soft-knee
+// gain stage right at the ceiling, so it only ever engages on genuinely
+// loud excursions near clipping, never on ordinary speech -- important
+// because RADE's neural encoder was almost certainly trained on
 // uncompressed speech (Barry, 2026-09-15).
+//
+// Originally a *two*-knee design (a gentler "compressor" knee pushed close
+// to the ceiling, feeding this same near-clip "limiter" knee). The
+// compressor knee was removed 2026-09-18 -- see CompressorLimiterStep.cpp's
+// comment at its old threshold constant -- once live testing showed its
+// one-directional gain reduction was feeding LevelerStep's closed feedback
+// loop a systematic upward bias on loud input (the leveler has no way to
+// distinguish "the compressor just reduced this" from "the input actually
+// got quieter"), and it was engaging often enough (~40% of rows on loud
+// speech) for that bias to be significant. A single rare, near-clip-only
+// limiter stage keeps the feedback loop meaningful (per Richard's spec --
+// the leveler should react to whatever this step actually does) while
+// keeping that bias negligible in practice.
 //
 // Owns a LoudnessMeter on its own *output*, feeding LevelerStep's feedback
 // loop via getLastOutputLoudnessLufs() (a static accessor, not an instance
