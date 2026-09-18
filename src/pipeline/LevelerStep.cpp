@@ -168,9 +168,22 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
 
 void LevelerStep::reset() FREEDV_NONBLOCKING
 {
-    // Explicit call from Barry (2026-09-15): keep the existing 0dB-gain-
-    // reset-on-reset() behavior rather than persisting gain across
-    // transmissions, as Richard's spec proposed.
-    currentGainDb_ = 0.0f;
-    targetGainDb_ = 0.0f;
+    // Reversed 2026-09-18 (Barry): reset() is called on *every* TX entry
+    // within a session (TxRxThread.cpp/MinimalTxRxThread.cpp's "just
+    // entered TX from RX" path is its only call site in either repo), not
+    // just once at Start -- so zeroing gain here meant every single PTT
+    // press re-ran the leveler's full climb from 0dB, rather than just
+    // once per session. That climb became far more noticeable after the
+    // 2026-09-18 feedback-formula fix (see the target-gain comment above):
+    // the corrected formula is a genuine integrator of the loudness error
+    // with no fixed equilibrium for real (non-constant) speech, so gain
+    // takes real, visible time to reach a sensible operating point from a
+    // cold 0dB start -- confirmed live via the diagnostic captures.
+    // Persisting gain across transmissions (i.e. not touching it here at
+    // all) means only the *first* transmission of a session pays that
+    // climb; later ones start already near the right operating point.
+    // This was Richard's original spec suggestion, explicitly rejected on
+    // 2026-09-15 before the above was known -- gain still starts at 0dB
+    // per-session via the constructor's own initialization, just no longer
+    // re-zeroed on every individual PTT press.
 }

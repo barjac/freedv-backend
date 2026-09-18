@@ -133,9 +133,13 @@ bool levelerFreezesGainWhenFeedbackBelowSilenceThreshold()
     return true;
 }
 
-// reset() should immediately return the gain to unity (0dB) rather than
-// continuing from wherever it had drifted to.
-bool levelerResetReturnsGainToUnity()
+// Reversed 2026-09-18 (Barry): reset() is called on every individual TX
+// entry within a session (its only call site in either repo is "just
+// entered TX from RX"), not just once at Start -- so zeroing gain here
+// meant every single PTT press re-ran the leveler's full climb from 0dB.
+// reset() now leaves gain untouched (persists across transmissions);
+// gain still starts at 0dB per-session via the constructor.
+bool levelerResetPreservesGain()
 {
     constexpr int sampleRate = 8000;
     constexpr double TOLERANCE_DB = 0.5;
@@ -148,10 +152,12 @@ bool levelerResetReturnsGainToUnity()
     std::unique_ptr<short[]> rawInput(generateOneSecondSineWave(1000.0f, sampleRate));
     std::vector<short> inputVec(rawInput.get(), rawInput.get() + sampleRate);
 
-    for (int second = 0; second < 60; second++)
+    std::vector<short> beforeReset;
+    for (int second = 0; second < 5; second++)
     {
-        runThroughLeveler(step, inputVec, sampleRate / 10);
+        beforeReset = runThroughLeveler(step, inputVec, sampleRate / 10);
     }
+    double gainBeforeDb = 20.0 * std::log10(measureRms(beforeReset) / measureRms(inputVec));
 
     step.reset();
 
@@ -159,10 +165,11 @@ bool levelerResetReturnsGainToUnity()
     short* result = step.execute(inputVec.data(), sampleRate / 10, &numOutputSamples);
     std::vector<short> output(result, result + numOutputSamples);
 
-    double gainDb = 20.0 * std::log10(measureRms(output) / measureRms(inputVec));
-    if (std::abs(gainDb) > TOLERANCE_DB)
+    double gainAfterDb = 20.0 * std::log10(measureRms(output) / measureRms(inputVec));
+    if (std::abs(gainAfterDb - gainBeforeDb) > TOLERANCE_DB)
     {
-        std::cerr << "[gain right after reset() was " << gainDb << "dB, expected close to 0dB]...";
+        std::cerr << "[gain was " << gainBeforeDb << "dB before reset(), " << gainAfterDb
+                   << "dB right after -- expected reset() to leave gain unchanged]...";
         return false;
     }
 
@@ -173,6 +180,6 @@ int main()
 {
     TEST_CASE(levelerConvergesTowardExpectedGainForQuietFeedback);
     TEST_CASE(levelerFreezesGainWhenFeedbackBelowSilenceThreshold);
-    TEST_CASE(levelerResetReturnsGainToUnity);
+    TEST_CASE(levelerResetPreservesGain);
     return 0;
 }
