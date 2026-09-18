@@ -57,31 +57,41 @@ double measureRms(const std::vector<short>& samples)
 
 } // namespace
 
-// With the feedback loudness held constant just above the silence gate
-// (well below the -23 LUFS target), the leveler's gain should converge
-// toward targetGainDb_ = -23 - feedbackLufs, following the proportional/
-// time-constant formula (not a fixed dB/sec ramp).
+// Simulates the real closed loop: feedback for the next chunk is derived
+// from a fixed true input level plus whatever gain was actually just
+// applied, rather than a constant value that never reacts to gain (a
+// non-reactive constant can't meaningfully exercise targetGainDb_'s
+// formula -- see LevelerStep.cpp's 2026-09-18 fix -- since that formula
+// specifically relies on feedback responding to applied gain in order to
+// converge to the full correction instead of getting stuck at half of it).
+// With this properly closed loop, gain should converge toward the full
+// correction -23 - trueInputLufs, following the proportional/time-constant
+// formula (not a fixed dB/sec ramp).
 bool levelerConvergesTowardExpectedGainForQuietFeedback()
 {
     constexpr int sampleRate = 8000;
     constexpr double TOLERANCE_DB = 1.0;
 
-    constexpr float feedbackLufs = -33.0f + 0.01f;
-    g_testFeedbackLufs.store(feedbackLufs);
+    constexpr float trueInputLufs = -33.0f + 0.01f;
+    g_testFeedbackLufs.store(trueInputLufs); // first chunk: no gain applied yet
 
     LevelerStep step(sampleRate, +testFeedbackFn, std::make_shared<DiagnosticCsvLogger>());
 
     std::unique_ptr<short[]> rawInput(generateOneSecondSineWave(1000.0f, sampleRate));
     std::vector<short> inputVec(rawInput.get(), rawInput.get() + sampleRate);
+    double inputRms = measureRms(inputVec);
 
     std::vector<short> lastOutput;
     for (int second = 0; second < 60; second++) // several time constants (10s each) to converge
     {
         lastOutput = runThroughLeveler(step, inputVec, sampleRate / 10);
+
+        double chunkGainDb = 20.0 * std::log10(measureRms(lastOutput) / inputRms);
+        g_testFeedbackLufs.store((float)(trueInputLufs + chunkGainDb));
     }
 
-    double gainDb = 20.0 * std::log10(measureRms(lastOutput) / measureRms(inputVec));
-    double expectedGainDb = -23.0 - feedbackLufs;
+    double gainDb = 20.0 * std::log10(measureRms(lastOutput) / inputRms);
+    double expectedGainDb = -23.0 - trueInputLufs;
 
     if (std::abs(gainDb - expectedGainDb) > TOLERANCE_DB)
     {

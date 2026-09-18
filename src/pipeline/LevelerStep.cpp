@@ -108,7 +108,27 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
         if (feedbackValid)
         {
             // Step 2: calculate target gain.
-            targetGainDb_ = LEVELER_TARGET_LUFS - feedbackLufs;
+            //
+            // feedbackLufs is measured on the *output* of the compressor/
+            // limiter, i.e. after currentGainDb_ has already been applied
+            // (the closed feedback loop described in the plan). Computing
+            // the target directly from that raw measurement is self-
+            // referential: at equilibrium (currentGainDb_ == targetGainDb_
+            // == G, and output == input + G), solving
+            // G = LEVELER_TARGET_LUFS - (input + G) gives
+            // G = (LEVELER_TARGET_LUFS - input) / 2 -- the loop settles at
+            // only *half* the actually-needed correction, a permanent
+            // steady-state error confirmed both mathematically and against
+            // real capture data (2026-09-18: current_gain plateaued flat
+            // for 16+ seconds at exactly half the implied input deficit,
+            // ruling out a convergence-speed/time-constant explanation).
+            //
+            // Fix: subtract the already-applied gain back out of the
+            // measurement first, recovering an estimate of the pre-gain
+            // input loudness. That estimate is independent of G, so the
+            // loop converges to the full correction instead of half.
+            float estimatedInputLufs = feedbackLufs - currentGainDb_;
+            targetGainDb_ = LEVELER_TARGET_LUFS - estimatedInputLufs;
             if (targetGainDb_ > LEVELER_GAIN_LIMIT_DB) targetGainDb_ = LEVELER_GAIN_LIMIT_DB;
             if (targetGainDb_ < -LEVELER_GAIN_LIMIT_DB) targetGainDb_ = -LEVELER_GAIN_LIMIT_DB;
 
