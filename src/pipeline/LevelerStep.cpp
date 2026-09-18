@@ -54,6 +54,15 @@ constexpr float LEVELER_GAIN_LIMIT_DB = 12.0f; // symmetric +/-12dB per spec
 constexpr float LEVELER_TIME_CONSTANT_SEC = 2.0f;
 constexpr float SILENCE_THRESHOLD_LUFS = -33.0f;
 
+// PI controller integral time constant (2026-09-18) -- see execute()'s
+// "PI controller" comment for the full derivation. Deliberately much
+// longer than LEVELER_TIME_CONSTANT_SEC: the integral term's only job is
+// slowly eliminating any *persistent* bias the proportional term's own
+// self-reference leaves behind, not reacting quickly (that's the
+// proportional term's job, via the existing current-gain smoothing
+// below). Starting recommendation, not yet tuned via live A/B testing.
+constexpr float LEVELER_INTEGRAL_TIME_CONSTANT_SEC = 15.0f;
+
 constexpr int TEN_MS_DIVIDER = 100;
 
 LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger)
@@ -61,6 +70,7 @@ LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLou
     , feedbackLoudnessLufsFn_(feedbackLoudnessLufsFn)
     , targetGainDb_(0.0f)
     , currentGainDb_(0.0f)
+    , integralErrorDb_(0.0f)
     , diagLogger_(diagLogger)
 {
     // Pre-allocate buffers so we don't have to do so during real-time operation.
@@ -107,28 +117,73 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
 
         if (feedbackValid)
         {
-            // Step 2: calculate target gain.
+            float blockDurationSec = (float)chunkSize / sampleRate_;
+
+            // Step 2: calculate target gain -- PI controller (2026-09-18).
             //
             // feedbackLufs is measured on the *output* of the compressor/
             // limiter, i.e. after currentGainDb_ has already been applied
-            // (the closed feedback loop described in the plan). Computing
-            // the target directly from that raw measurement is self-
-            // referential: at equilibrium (currentGainDb_ == targetGainDb_
-            // == G, and output == input + G), solving
-            // G = LEVELER_TARGET_LUFS - (input + G) gives
-            // G = (LEVELER_TARGET_LUFS - input) / 2 -- the loop settles at
-            // only *half* the actually-needed correction, a permanent
-            // steady-state error confirmed both mathematically and against
-            // real capture data (2026-09-18: current_gain plateaued flat
-            // for 16+ seconds at exactly half the implied input deficit,
-            // ruling out a convergence-speed/time-constant explanation).
+            // (the closed feedback loop described in the plan), so the raw
+            // instantaneous error below is self-referential in exactly the
+            // way the original (single-term, proportional-only) formula
+            // was: at equilibrium (current==target==G, output==input+G),
+            // G = LEVELER_TARGET_LUFS - (input + G) only has a solution at
+            // G = (LEVELER_TARGET_LUFS - input) / 2 -- half the needed
+            // correction, a permanent steady-state error (confirmed
+            // 2026-09-18: current_gain plateaued flat for 16+ seconds at
+            // exactly half the implied input deficit).
             //
-            // Fix: subtract the already-applied gain back out of the
-            // measurement first, recovering an estimate of the pre-gain
-            // input loudness. That estimate is independent of G, so the
-            // loop converges to the full correction instead of half.
-            float estimatedInputLufs = feedbackLufs - currentGainDb_;
-            targetGainDb_ = LEVELER_TARGET_LUFS - estimatedInputLufs;
+            // An earlier fix (2026-09-18, same day) tried subtracting
+            // currentGainDb_ back out of the estimate to cancel that self-
+            // reference algebraically. It worked for a genuinely constant
+            // signal (LevelerStepTest's synthetic sine wave), but
+            // substituting it into the smoothing update below shows the
+            // currentGainDb_ terms cancel *completely*, turning the whole
+            // formula into a pure integrator of the loudness error with no
+            // restoring force at all. For real, time-varying speech that
+            // has no fixed equilibrium -- confirmed live (2026-09-18):
+            // current_gain climbing steadily through an entire transmission
+            // despite steady -23 LUFS input (not converging, just slowly
+            // drifting), and later, gain persisting near 0dB through a
+            // sustained loud passage despite target repeatedly diving to
+            // -6..-8dB (the net average of a real recording's momentary
+            // loudness swings doesn't have to average to zero just because
+            // the recording is "loud overall").
+            //
+            // Fix: a genuine PI controller. The proportional term below is
+            // the same self-referential raw error the original formula
+            // used (still only "correct" to within the same 50% bias in
+            // isolation) -- but paired with a separate, slowly-accumulating
+            // integral term that has no such bias and dominates at true
+            // equilibrium. Substituting into the smoothing update: at
+            // equilibrium (current==target==G, *and* the integral term has
+            // stopped changing, which only happens once the instantaneous
+            // error is itself zero), solving requires feedbackLufs to reach
+            // LEVELER_TARGET_LUFS exactly -- independent of the
+            // proportional term's own gain (Kp) or the integral time
+            // constant (Ki), which only affect *how fast* it gets there,
+            // not the final value. The proportional term still supplies a
+            // genuine restoring force for real, varying speech (reacting
+            // to each block's error directly, smoothed by the existing
+            // current-gain lag below) that the pure-integrator attempt
+            // above lacked entirely.
+            constexpr float KP = 1.0f;
+            float instantErrorDb = LEVELER_TARGET_LUFS - feedbackLufs;
+
+            integralErrorDb_ += instantErrorDb * blockDurationSec;
+            // Anti-windup: without this, a long loud or quiet stretch that
+            // saturates targetGainDb_'s clamp below could keep accumulating
+            // integralErrorDb_ far beyond what's ever usable, so once real
+            // conditions reverse, gain would take a long time to "unwind"
+            // that excess before it starts responding correctly again --
+            // the classic PI integrator-windup problem. Clamping
+            // integralErrorDb_ itself to the range that keeps its own
+            // contribution within +/-LEVELER_GAIN_LIMIT_DB avoids that.
+            float integralClampDb = LEVELER_GAIN_LIMIT_DB * LEVELER_INTEGRAL_TIME_CONSTANT_SEC;
+            if (integralErrorDb_ > integralClampDb) integralErrorDb_ = integralClampDb;
+            if (integralErrorDb_ < -integralClampDb) integralErrorDb_ = -integralClampDb;
+
+            targetGainDb_ = KP * instantErrorDb + integralErrorDb_ / LEVELER_INTEGRAL_TIME_CONSTANT_SEC;
             if (targetGainDb_ > LEVELER_GAIN_LIMIT_DB) targetGainDb_ = LEVELER_GAIN_LIMIT_DB;
             if (targetGainDb_ < -LEVELER_GAIN_LIMIT_DB) targetGainDb_ = -LEVELER_GAIN_LIMIT_DB;
 
@@ -136,7 +191,6 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
             // target each block, rather than a fixed dB/sec step -- this is
             // what makes the formula self-compensate for EBU R128's
             // irregular update opportunities during real speech.
-            float blockDurationSec = (float)chunkSize / sampleRate_;
             currentGainDb_ += ((targetGainDb_ - currentGainDb_) / LEVELER_TIME_CONSTANT_SEC) * blockDurationSec;
         }
 
@@ -186,4 +240,11 @@ void LevelerStep::reset() FREEDV_NONBLOCKING
     // 2026-09-15 before the above was known -- gain still starts at 0dB
     // per-session via the constructor's own initialization, just no longer
     // re-zeroed on every individual PTT press.
+    //
+    // integralErrorDb_ (added same day, PI controller redesign) is left
+    // untouched here for the same reason -- resetting it while
+    // currentGainDb_ persists would make targetGainDb_ jump discontinuously
+    // at the start of the next transmission (losing the integral
+    // contribution that was supporting wherever currentGainDb_ currently
+    // sits), the opposite of the smooth persistence intended above.
 }

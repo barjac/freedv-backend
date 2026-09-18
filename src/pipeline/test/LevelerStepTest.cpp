@@ -60,13 +60,14 @@ double measureRms(const std::vector<short>& samples)
 // Simulates the real closed loop: feedback for the next chunk is derived
 // from a fixed true input level plus whatever gain was actually just
 // applied, rather than a constant value that never reacts to gain (a
-// non-reactive constant can't meaningfully exercise targetGainDb_'s
-// formula -- see LevelerStep.cpp's 2026-09-18 fix -- since that formula
+// non-reactive constant can't meaningfully exercise targetGainDb_'s PI
+// formula -- see LevelerStep.cpp's 2026-09-18 comments -- since it
 // specifically relies on feedback responding to applied gain in order to
-// converge to the full correction instead of getting stuck at half of it).
-// With this properly closed loop, gain should converge toward the full
-// correction -23 - trueInputLufs, following the proportional/time-constant
-// formula (not a fixed dB/sec ramp).
+// converge to the full correction). For a genuinely constant input like
+// this test's, the PI controller's proportional and integral terms both
+// eventually converge, and true equilibrium requires feedbackLufs to reach
+// exactly -23 LUFS regardless of either term's own gain -- so gain should
+// converge toward the full correction -23 - trueInputLufs.
 bool levelerConvergesTowardExpectedGainForQuietFeedback()
 {
     constexpr int sampleRate = 8000;

@@ -64,6 +64,15 @@ private:
     realtime_fp<float()> feedbackLoudnessLufsFn_;
     float targetGainDb_;
     float currentGainDb_;
+    // PI controller integral term -- see the "PI controller" comment in
+    // execute() for why this exists (2026-09-18). Accumulates the raw
+    // loudness error over time (dB*sec); divided by
+    // LEVELER_INTEGRAL_TIME_CONSTANT_SEC to get its dB contribution to
+    // targetGainDb_. Persists across transmissions, same as
+    // currentGainDb_/targetGainDb_ (see reset()) -- keeping all three
+    // consistent avoids a discontinuous jump in target at the start of a
+    // new transmission.
+    float integralErrorDb_;
     std::unique_ptr<short[]> outputSamples_;
     std::shared_ptr<DiagnosticCsvLogger> diagLogger_;
 };
