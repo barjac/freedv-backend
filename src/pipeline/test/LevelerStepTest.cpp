@@ -66,8 +66,12 @@ double measureRms(const std::vector<short>& samples)
 // converge to the full correction). For a genuinely constant input like
 // this test's, the PI controller's proportional and integral terms both
 // eventually converge, and true equilibrium requires feedbackLufs to reach
-// exactly -23 LUFS regardless of either term's own gain -- so gain should
-// converge toward the full correction -23 - trueInputLufs.
+// exactly LEVELER_TARGET_LUFS regardless of either term's own gain -- so
+// gain should converge toward the full correction (target - trueInputLufs).
+// NOTE: LEVELER_TARGET_LUFS lives in LevelerStep.cpp (file-scope constexpr,
+// not exposed via the header), so the -26.0 literal below must be kept in
+// sync with it by hand -- currently -26.0f as of 2026-09-19 (comparative
+// test vs. the original -23.0f, see LevelerStep.cpp's own comment there).
 bool levelerConvergesTowardExpectedGainForQuietFeedback()
 {
     constexpr int sampleRate = 8000;
@@ -92,7 +96,7 @@ bool levelerConvergesTowardExpectedGainForQuietFeedback()
     }
 
     double gainDb = 20.0 * std::log10(measureRms(lastOutput) / inputRms);
-    double expectedGainDb = -23.0 - trueInputLufs;
+    double expectedGainDb = -26.0 - trueInputLufs; // keep in sync with LevelerStep.cpp's LEVELER_TARGET_LUFS
 
     if (std::abs(gainDb - expectedGainDb) > TOLERANCE_DB)
     {
