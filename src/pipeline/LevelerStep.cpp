@@ -65,11 +65,21 @@ constexpr float SILENCE_THRESHOLD_LUFS = -33.0f;
 // ~20-30s test -- but a "low" test needing ~7-9dB of correction was still
 // visibly climbing, not yet converged, by ~22 seconds) to 6.0f, matching
 // Richard (G4DYA)'s original spec suggestion for the old AgcStep's release
-// time (see LEVELER_TIME_CONSTANT_SEC's own history comment below) --
-// reused here as a reasonable, already-somewhat-validated starting point
-// for a faster integral response, not re-derived from scratch. Re-tune
-// further if this over/undershoots in practice.
-constexpr float LEVELER_INTEGRAL_TIME_CONSTANT_SEC = 6.0f;
+// time -- confirmed a clear live improvement (low converged noticeably
+// faster/closer, high stayed rock-steady at target throughout).
+//
+// Further lowered same day to 4.0f, per Barry: the old AgcStep tolerated
+// symmetric attack/release as fast as 2-3s without excessive wander (see
+// LEVELER_TIME_CONSTANT_SEC's own history comment below). Worth treating
+// that precedent cautiously rather than assuming it transfers directly,
+// though -- unlike a simple lag (which is inherently self-limiting/
+// restoring at any speed), this integral term has *no* restoring force of
+// its own (that's the proportional term's and the 2.0s current-gain
+// smoothing's job); making it faster mainly risks overshoot past the
+// target rather than the kind of wander a simple lag would show. Anti-
+// windup clamping is already in place either way. Re-tune further if this
+// over/undershoots in practice.
+constexpr float LEVELER_INTEGRAL_TIME_CONSTANT_SEC = 4.0f;
 
 constexpr int TEN_MS_DIVIDER = 100;
 
