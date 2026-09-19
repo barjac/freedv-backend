@@ -55,13 +55,21 @@ constexpr float LEVELER_TIME_CONSTANT_SEC = 2.0f;
 constexpr float SILENCE_THRESHOLD_LUFS = -33.0f;
 
 // PI controller integral time constant (2026-09-18) -- see execute()'s
-// "PI controller" comment for the full derivation. Deliberately much
-// longer than LEVELER_TIME_CONSTANT_SEC: the integral term's only job is
-// slowly eliminating any *persistent* bias the proportional term's own
-// self-reference leaves behind, not reacting quickly (that's the
-// proportional term's job, via the existing current-gain smoothing
-// below). Starting recommendation, not yet tuned via live A/B testing.
-constexpr float LEVELER_INTEGRAL_TIME_CONSTANT_SEC = 15.0f;
+// "PI controller" comment for the full derivation. Deliberately longer
+// than LEVELER_TIME_CONSTANT_SEC: the integral term's only job is slowly
+// eliminating any *persistent* bias the proportional term's own self-
+// reference leaves behind, not reacting quickly (that's the proportional
+// term's job, via the existing current-gain smoothing below).
+// 2026-09-19: lowered from an initial 15.0f (which live-tested fine for
+// "normal"/"high" input -- converged and settled correctly within a
+// ~20-30s test -- but a "low" test needing ~7-9dB of correction was still
+// visibly climbing, not yet converged, by ~22 seconds) to 6.0f, matching
+// Richard (G4DYA)'s original spec suggestion for the old AgcStep's release
+// time (see LEVELER_TIME_CONSTANT_SEC's own history comment below) --
+// reused here as a reasonable, already-somewhat-validated starting point
+// for a faster integral response, not re-derived from scratch. Re-tune
+// further if this over/undershoots in practice.
+constexpr float LEVELER_INTEGRAL_TIME_CONSTANT_SEC = 6.0f;
 
 constexpr int TEN_MS_DIVIDER = 100;
 
