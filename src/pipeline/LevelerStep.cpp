@@ -44,18 +44,7 @@
 // release -- proven in earlier live A/B testing that a proportional/
 // time-constant formula (see execute() below) tracks real speech far more
 // smoothly under EBU R128's silence-gating than a fixed dB/sec ramp.
-// -26.0f as of 2026-09-19 (Barry): comparative test only, not a settled
-// value. -23 LUFS (the EBU R128 broadcast standard, Richard's original
-// spec target) was confirmed working *correctly* by the 2026-09-18 PI
-// controller fix -- closed-loop feedback now reaches the target properly,
-// no longer stuck at the old ~50% self-reference bias -- but a real
-// recording of decoded TX audio under that fix regularly hit -20 LUFS
-// (peaking to -17), and reducing input level had little effect (expected,
-// exactly what a correctly-converging leveler should do: it reaches the
-// same target regardless of input). Barry's read: -23 itself may simply be
-// too hot for comfortable listening now that the leveler actually hits it.
-// Revert to -23.0f if this doesn't test better.
-constexpr float LEVELER_TARGET_LUFS = -26.0f;
+constexpr float LEVELER_TARGET_LUFS = -23.0f;
 constexpr float LEVELER_GAIN_LIMIT_DB = 12.0f; // symmetric +/-12dB per spec
 // 2.0s, per Barry's own prior live-tuning history on the old AgcStep (2026-09-15
 // clarification): 0.5s/6.0s asymmetric -> symmetric 3.0s/3.0s (confirmed
