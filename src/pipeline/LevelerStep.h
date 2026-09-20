@@ -91,10 +91,13 @@ private:
     // new transmission.
     float integralErrorDb_;
     // Startup ramp-in (2026-09-20) -- see execute()'s own comment on why
-    // this exists. Tracks real elapsed processing time since construction;
-    // only needed for the first STARTUP_RAMP_SEC of a session's life, after
-    // which it's left to grow unused (harmless).
-    float sessionElapsedSec_;
+    // this exists. rampStarted_ latches true the first time real
+    // (non-silent) audio is seen and never resets (including across
+    // reset(), same persistence philosophy as currentGainDb_ etc. above)
+    // -- only the *first* real audio of a whole session needs this
+    // protection. rampElapsedSec_ only advances once rampStarted_ is true.
+    bool rampStarted_;
+    float rampElapsedSec_;
     std::unique_ptr<short[]> outputSamples_;
     std::shared_ptr<DiagnosticCsvLogger> diagLogger_;
 };

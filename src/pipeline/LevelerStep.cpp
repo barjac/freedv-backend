@@ -100,7 +100,26 @@ constexpr int TEN_MS_DIVIDER = 100;
 // speech onset, but gives the limiter's per-sample envelope (2-5ms attack)
 // dozens of reaction cycles on real, gradually-increasing gain before the
 // full persisted value ever lands.
+//
+// Correction, same day (Barry, watching the newly-added applied-gain
+// trace): the ramp must NOT be keyed to wall-clock time since
+// construction -- a first version did exactly that, and Barry caught
+// (from the graph) that it was completing "immediately after TX starts,
+// long before the first syllable". In real use there's always some delay
+// between pressing Start (LevelerStep's construction) and actually
+// keying PTT and speaking, so a construction-time-based ramp had always
+// already finished by the time real audio arrived -- protecting nothing.
+// Fixed by keying the ramp to elapsed time since the first genuinely
+// non-silent input is actually seen (REAL_AUDIO_PEAK_THRESHOLD below),
+// which is the moment protection is actually needed.
 constexpr float STARTUP_RAMP_SEC = 0.3f;
+
+// -50dBFS -- quiet room tone/mic self-noise should stay below this, while
+// even a soft spoken word should exceed it. Only used to decide when the
+// startup ramp-in above should start counting; unrelated to
+// SILENCE_THRESHOLD_LUFS (a *measured loudness* gate on the leveler's
+// feedback, not a raw-peak gate on its input).
+constexpr double REAL_AUDIO_PEAK_THRESHOLD = 0.00316;
 
 LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
                          float initialGainDb, float initialIntegralErrorDb)
@@ -109,7 +128,8 @@ LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLou
     , targetGainDb_(initialGainDb)
     , currentGainDb_(initialGainDb)
     , integralErrorDb_(initialIntegralErrorDb)
-    , sessionElapsedSec_(0.0f)
+    , rampStarted_(false)
+    , rampElapsedSec_(0.0f)
     , diagLogger_(diagLogger)
 {
     // Pre-allocate buffers so we don't have to do so during real-time operation.
@@ -155,12 +175,31 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
         bool feedbackValid = feedbackLufs > SILENCE_THRESHOLD_LUFS;
         float blockDurationSec = (float)chunkSize / sampleRate_;
 
-        // Startup ramp-in bookkeeping -- must advance every block
-        // regardless of feedbackValid (real time keeps passing during the
-        // initial EBU R128 warm-up/silence too, and that's exactly the
-        // window this ramp needs to cover). See STARTUP_RAMP_SEC's own
-        // comment above.
-        sessionElapsedSec_ += blockDurationSec;
+        // Raw input peak for this chunk -- needed both for the startup
+        // ramp-in's "has real audio actually started" check below and (as
+        // always) for the diagnostic input_dbfs value further down.
+        // Deliberately a separate pass over inPtr before any gain is
+        // applied, rather than folded into the sample-scaling loop below
+        // as it used to be -- this chunk's ramp state must be decided
+        // *before* computing this same chunk's applied gain.
+        double peakAbs = 0.0;
+        for (int i = 0; i < chunkSize; i++)
+        {
+            double absVal = std::abs((double)inPtr[i]) / 32768.0;
+            if (absVal > peakAbs) peakAbs = absVal;
+        }
+
+        // Startup ramp-in bookkeeping -- see STARTUP_RAMP_SEC's own
+        // comment above for why this exists and why it's keyed to real
+        // audio arriving, not wall-clock time since construction.
+        if (!rampStarted_ && peakAbs > REAL_AUDIO_PEAK_THRESHOLD)
+        {
+            rampStarted_ = true;
+        }
+        if (rampStarted_)
+        {
+            rampElapsedSec_ += blockDurationSec;
+        }
 
         if (feedbackValid)
         {
@@ -240,23 +279,21 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
         }
 
         // Scale samples based on current gain -- ramped in over
-        // STARTUP_RAMP_SEC of real elapsed time since construction (a
-        // no-op once past it, and effectively a no-op for a fresh,
+        // STARTUP_RAMP_SEC of real elapsed time since real audio was first
+        // seen (a no-op once past it, and effectively a no-op for a fresh,
         // non-seeded session too, since currentGainDb_ can't move far from
         // 0 in under a second anyway). Deliberately doesn't touch
         // currentGainDb_ itself -- the PI controller's own state keeps
         // evolving normally underneath; only the actually-*applied* gain
-        // is held back at the very start.
-        float rampInFactor = std::min(1.0f, sessionElapsedSec_ / STARTUP_RAMP_SEC);
+        // is held back at the very start. Before real audio has ever been
+        // seen (rampStarted_ still false), there's nothing to protect
+        // against yet, so apply gain in full -- harmless on silence.
+        float rampInFactor = rampStarted_ ? std::min(1.0f, rampElapsedSec_ / STARTUP_RAMP_SEC) : 1.0f;
         float appliedGainDb = currentGainDb_ * rampInFactor;
         float scaleFactor = expf(appliedGainDb / 20.0f * logf(10.0f));
-        double peakAbs = 0.0;
         float temp = 0.0f;
         for (int i = 0; i < chunkSize; i++)
         {
-            double absVal = std::abs((double)inPtr[i]) / 32768.0;
-            if (absVal > peakAbs) peakAbs = absVal;
-
             ConvertSingleSampleToFloatSampleType_<float, short>(&inPtr[i], &temp);
             temp *= scaleFactor;
             ConvertSingleSampleToIntSampleType_<short, float>(&temp, &outPtr[i]);

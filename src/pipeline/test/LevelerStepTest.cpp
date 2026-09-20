@@ -215,13 +215,16 @@ bool levelerCanBeSeededWithSavedGain()
     std::vector<short> inputVec(rawInput.get(), rawInput.get() + sampleRate);
     double inputRms = measureRms(inputVec);
 
-    // First block (100ms) falls entirely within the 300ms ramp-in window --
-    // actual applied gain should be well below the seeded value here. This
-    // is the specific real-world failure this ramp fixes: a persisted
-    // gain applied in full from sample one, stacking with
-    // CompressorLimiterStep's own gain-reduction envelope also starting
-    // cold, was confirmed (via a real capture) to push an otherwise-safe
-    // first syllable to true 0dBFS.
+    // This test's sine wave is real (non-silent) audio from sample one, so
+    // the ramp-in starts counting immediately, same as if this were the
+    // very first real speech of a session. First block (100ms) falls
+    // entirely within the 300ms ramp-in window -- actual applied gain
+    // should be well below the seeded value here. This is the specific
+    // real-world failure this ramp fixes: a persisted gain applied in
+    // full from sample one, stacking with CompressorLimiterStep's own
+    // gain-reduction envelope also starting cold, was confirmed (via a
+    // real capture) to push an otherwise-safe first syllable to true
+    // 0dBFS.
     int numOutputSamples = 0;
     short* result = step.execute(inputVec.data(), sampleRate / 10, &numOutputSamples);
     double firstBlockGainDb = 20.0 * std::log10(measureRms(std::vector<short>(result, result + numOutputSamples)) / inputRms);
@@ -252,11 +255,63 @@ bool levelerCanBeSeededWithSavedGain()
     return true;
 }
 
+// Regression test, 2026-09-20: a first version of the ramp-in above keyed
+// it to wall-clock time since construction rather than to real audio
+// actually arriving. Barry caught it from the diagnostic graph: "that is
+// happening immediately after TX starts, long before the first syllable"
+// -- in real use there's always some delay between the leveler being
+// constructed (pressing Start) and a real transmission actually beginning
+// (pressing PTT and speaking), so a construction-time ramp had always
+// already finished by the time real audio arrived, protecting nothing.
+// This simulates exactly that gap: several seconds of silence (as if idle
+// in RX) before any real signal, then checks the first block of *real*
+// audio is still ramping in, not already at full seeded gain.
+bool levelerRampInWaitsForRealAudioNotJustElapsedTime()
+{
+    constexpr int sampleRate = 8000;
+    constexpr float seededGainDb = 7.5f;
+    constexpr float seededIntegralErrorDb = 30.0f; // see levelerCanBeSeededWithSavedGain's own comment
+
+    g_testFeedbackLufs.store(-23.0f);
+    LevelerStep step(sampleRate, +testFeedbackFn, std::make_shared<DiagnosticCsvLogger>(), seededGainDb, seededIntegralErrorDb);
+
+    // Several seconds of digital silence, well past the 300ms ramp window
+    // if it were (wrongly) keyed to elapsed time alone -- simulates idle
+    // RX time between Start and the operator actually keying PTT.
+    std::vector<short> silence(sampleRate / 10, 0);
+    for (int block = 0; block < 30; block++) // 3 seconds
+    {
+        int numOutputSamples = 0;
+        step.execute(silence.data(), (int)silence.size(), &numOutputSamples);
+    }
+
+    // Now real audio arrives for the first time -- this is the moment
+    // that actually needs protecting, regardless of how much idle time
+    // came before it.
+    std::unique_ptr<short[]> rawInput(generateOneSecondSineWave(1000.0f, sampleRate));
+    std::vector<short> inputVec(rawInput.get(), rawInput.get() + sampleRate);
+    double inputRms = measureRms(inputVec);
+
+    int numOutputSamples = 0;
+    short* result = step.execute(inputVec.data(), sampleRate / 10, &numOutputSamples);
+    double firstRealBlockGainDb = 20.0 * std::log10(measureRms(std::vector<short>(result, result + numOutputSamples)) / inputRms);
+    if (firstRealBlockGainDb > seededGainDb - 3.0)
+    {
+        std::cerr << "[first block of real audio (after 3s of prior silence) had gain " << firstRealBlockGainDb
+                   << "dB, expected it well below the seeded " << seededGainDb
+                   << "dB -- ramp-in appears to be keyed to elapsed time rather than real audio arriving]...";
+        return false;
+    }
+
+    return true;
+}
+
 int main()
 {
     TEST_CASE(levelerConvergesTowardExpectedGainForQuietFeedback);
     TEST_CASE(levelerFreezesGainWhenFeedbackBelowSilenceThreshold);
     TEST_CASE(levelerResetPreservesGain);
     TEST_CASE(levelerCanBeSeededWithSavedGain);
+    TEST_CASE(levelerRampInWaitsForRealAudioNotJustElapsedTime);
     return 0;
 }
