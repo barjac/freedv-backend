@@ -114,12 +114,26 @@ constexpr int TEN_MS_DIVIDER = 100;
 // which is the moment protection is actually needed.
 constexpr float STARTUP_RAMP_SEC = 0.3f;
 
-// -50dBFS -- quiet room tone/mic self-noise should stay below this, while
-// even a soft spoken word should exceed it. Only used to decide when the
+// -20dBFS (2026-09-20, raised from an initial -50dBFS -- Barry: "Without
+// rnnoise -50dBFS would be much too low"). Raw, unsuppressed mic self-
+// noise/room tone can comfortably exceed -50dBFS with RNNoise off, which
+// would falsely start (and so waste) the ramp on background hiss rather
+// than genuine speech -- reproducing the exact failure this ramp exists
+// to fix, just via a different route (the ramp finishing on noise instead
+// of on elapsed time, before the real loud syllable ever arrives).
+// Deliberately erred toward a *higher* (louder) threshold: triggering
+// late only delays the ramp's start until something genuinely loud
+// arrives, which is exactly when protection is actually needed anyway,
+// whereas triggering early on mere noise defeats the whole point. Real
+// speech peaks observed in captures so far run -5 to -25dBFS -- -20dBFS
+// stays clear of typical background noise while still comfortably
+// catching real speech onsets, but may need raising further on a
+// particularly noisy setup (e.g. RNNoise off with a noisy room or open
+// rig/SDR audio bleeding into the mic path). Only used to decide when the
 // startup ramp-in above should start counting; unrelated to
 // SILENCE_THRESHOLD_LUFS (a *measured loudness* gate on the leveler's
 // feedback, not a raw-peak gate on its input).
-constexpr double REAL_AUDIO_PEAK_THRESHOLD = 0.00316;
+constexpr double REAL_AUDIO_PEAK_THRESHOLD = 0.1; // -20dBFS
 
 LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
                          float initialGainDb, float initialIntegralErrorDb)

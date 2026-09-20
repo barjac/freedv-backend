@@ -211,7 +211,13 @@ bool levelerCanBeSeededWithSavedGain()
         return false;
     }
 
-    std::unique_ptr<short[]> rawInput(generateOneSecondSineWave(1000.0f, sampleRate));
+    // Amplitude 10000 (~-10.3dBFS) -- must clear REAL_AUDIO_PEAK_THRESHOLD
+    // (-20dBFS) in LevelerStep.cpp for the ramp-in to ever start; this
+    // test's other sibling tests use a quieter 1000 (~-30.3dBFS), which is
+    // deliberately correct for testing the *un-ramped* PI controller math
+    // but would sit under the real-audio threshold and never trigger this
+    // test's own ramp-in behavior.
+    std::unique_ptr<short[]> rawInput(generateOneSecondSineWave(10000.0f, sampleRate));
     std::vector<short> inputVec(rawInput.get(), rawInput.get() + sampleRate);
     double inputRms = measureRms(inputVec);
 
@@ -287,8 +293,10 @@ bool levelerRampInWaitsForRealAudioNotJustElapsedTime()
 
     // Now real audio arrives for the first time -- this is the moment
     // that actually needs protecting, regardless of how much idle time
-    // came before it.
-    std::unique_ptr<short[]> rawInput(generateOneSecondSineWave(1000.0f, sampleRate));
+    // came before it. Amplitude 10000 (~-10.3dBFS), same reasoning as
+    // levelerCanBeSeededWithSavedGain -- must clear
+    // REAL_AUDIO_PEAK_THRESHOLD (-20dBFS) to trigger the ramp at all.
+    std::unique_ptr<short[]> rawInput(generateOneSecondSineWave(10000.0f, sampleRate));
     std::vector<short> inputVec(rawInput.get(), rawInput.get() + sampleRate);
     double inputRms = measureRms(inputVec);
 
