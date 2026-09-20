@@ -83,12 +83,13 @@ constexpr float LEVELER_INTEGRAL_TIME_CONSTANT_SEC = 4.0f;
 
 constexpr int TEN_MS_DIVIDER = 100;
 
-LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger)
+LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
+                         float initialGainDb, float initialIntegralErrorDb)
     : sampleRate_(sampleRate)
     , feedbackLoudnessLufsFn_(feedbackLoudnessLufsFn)
-    , targetGainDb_(0.0f)
-    , currentGainDb_(0.0f)
-    , integralErrorDb_(0.0f)
+    , targetGainDb_(initialGainDb)
+    , currentGainDb_(initialGainDb)
+    , integralErrorDb_(initialIntegralErrorDb)
     , diagLogger_(diagLogger)
 {
     // Pre-allocate buffers so we don't have to do so during real-time operation.

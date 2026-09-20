@@ -177,10 +177,56 @@ bool levelerResetPreservesGain()
     return true;
 }
 
+// 2026-09-20: LevelerStep can be seeded with a saved gain/integral-error
+// pair (e.g. restored from a config file at the start of a new session,
+// see the constructor's own comment) instead of always cold-starting at
+// 0dB -- verify the seeded state is what execute() actually starts from
+// and that the getters report it back correctly.
+bool levelerCanBeSeededWithSavedGain()
+{
+    constexpr int sampleRate = 8000;
+    constexpr float seededGainDb = 7.5f;
+    constexpr float seededIntegralErrorDb = 12.0f;
+    constexpr double TOLERANCE_DB = 0.5;
+
+    // Feedback exactly at target with no gain applied yet -- if the seeded
+    // gain weren't actually being applied, the first block's output would
+    // sit at ~0dB gain instead of ~seededGainDb.
+    g_testFeedbackLufs.store(-23.0f);
+    LevelerStep step(sampleRate, +testFeedbackFn, std::make_shared<DiagnosticCsvLogger>(), seededGainDb, seededIntegralErrorDb);
+
+    if (std::abs(step.getCurrentGainDb() - seededGainDb) > TOLERANCE_DB ||
+        std::abs(step.getIntegralErrorDb() - seededIntegralErrorDb) > TOLERANCE_DB)
+    {
+        std::cerr << "[getters reported gain=" << step.getCurrentGainDb() << "dB, integralError="
+                   << step.getIntegralErrorDb() << "dB right after construction, expected " << seededGainDb
+                   << "dB/" << seededIntegralErrorDb << "dB]...";
+        return false;
+    }
+
+    std::unique_ptr<short[]> rawInput(generateOneSecondSineWave(1000.0f, sampleRate));
+    std::vector<short> inputVec(rawInput.get(), rawInput.get() + sampleRate);
+
+    int numOutputSamples = 0;
+    short* result = step.execute(inputVec.data(), sampleRate / 10, &numOutputSamples);
+    std::vector<short> output(result, result + numOutputSamples);
+
+    double firstBlockGainDb = 20.0 * std::log10(measureRms(output) / measureRms(inputVec));
+    if (std::abs(firstBlockGainDb - seededGainDb) > TOLERANCE_DB)
+    {
+        std::cerr << "[first block's actual gain was " << firstBlockGainDb << "dB, expected ~" << seededGainDb
+                   << "dB from the seeded starting point]...";
+        return false;
+    }
+
+    return true;
+}
+
 int main()
 {
     TEST_CASE(levelerConvergesTowardExpectedGainForQuietFeedback);
     TEST_CASE(levelerFreezesGainWhenFeedbackBelowSilenceThreshold);
     TEST_CASE(levelerResetPreservesGain);
+    TEST_CASE(levelerCanBeSeededWithSavedGain);
     return 0;
 }

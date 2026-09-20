@@ -51,13 +51,30 @@
 class LevelerStep : public IPipelineStep
 {
 public:
-    LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger);
+    // initialGainDb/initialIntegralErrorDb (2026-09-20): seed the same
+    // persisted state reset() already preserves across transmissions
+    // within a session (see reset()'s own comment) -- lets a caller resume
+    // from a value saved at the end of a *previous* session (e.g. in the
+    // GUI's config file) instead of always starting cold at 0dB. Callers
+    // that don't care (e.g. existing tests) get the original 0dB/0dB
+    // cold-start behavior via the defaults.
+    LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
+                float initialGainDb = 0.0f, float initialIntegralErrorDb = 0.0f);
     virtual ~LevelerStep();
 
     virtual int getInputSampleRate() const FREEDV_NONBLOCKING override;
     virtual int getOutputSampleRate() const FREEDV_NONBLOCKING override;
     virtual short* execute(short* inputSamples, int numInputSamples, int* numOutputSamples) FREEDV_NONBLOCKING override;
     virtual void reset() FREEDV_NONBLOCKING override;
+
+    // Only safe to call once the pipeline thread that calls execute() has
+    // actually stopped calling it (e.g. after the owning TxRxThread has
+    // been joined) -- these read currentGainDb_/integralErrorDb_ with no
+    // synchronization of their own, matching how execute() itself is only
+    // ever called from that one thread. Intended for a caller to persist
+    // this state (e.g. to a config file) once a session ends.
+    float getCurrentGainDb() const FREEDV_NONBLOCKING { return currentGainDb_; }
+    float getIntegralErrorDb() const FREEDV_NONBLOCKING { return integralErrorDb_; }
 
 private:
     int sampleRate_;
