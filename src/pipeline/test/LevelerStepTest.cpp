@@ -180,19 +180,26 @@ bool levelerResetPreservesGain()
 // 2026-09-20: LevelerStep can be seeded with a saved gain/integral-error
 // pair (e.g. restored from a config file at the start of a new session,
 // see the constructor's own comment) instead of always cold-starting at
-// 0dB -- verify the seeded state is what execute() actually starts from
-// and that the getters report it back correctly.
+// 0dB -- verify the getters report the seeded state back correctly, and
+// that it's what execute() actually converges to once the startup ramp-in
+// (see STARTUP_RAMP_SEC in LevelerStep.cpp) has finished.
 bool levelerCanBeSeededWithSavedGain()
 {
     constexpr int sampleRate = 8000;
     constexpr float seededGainDb = 7.5f;
-    constexpr float seededIntegralErrorDb = 12.0f;
+    // Chosen to be self-consistent with seededGainDb under feedback held
+    // exactly at target (instantErrorDb == 0, so targetGainDb_ ==
+    // integralErrorDb_/LEVELER_INTEGRAL_TIME_CONSTANT_SEC): 7.5 * 4.0.
+    // LEVELER_INTEGRAL_TIME_CONSTANT_SEC is file-scope in LevelerStep.cpp
+    // (not exposed via the header), so like LEVELER_TARGET_LUFS elsewhere
+    // in this file, this constant must be kept in sync by hand if it
+    // changes -- otherwise this test would see genuine (correct) gain
+    // drift toward a mismatched target and start failing for a reason
+    // unrelated to what it's actually checking.
+    constexpr float seededIntegralErrorDb = 30.0f;
     constexpr double TOLERANCE_DB = 0.5;
 
-    // Feedback exactly at target with no gain applied yet -- if the seeded
-    // gain weren't actually being applied, the first block's output would
-    // sit at ~0dB gain instead of ~seededGainDb.
-    g_testFeedbackLufs.store(-23.0f);
+    g_testFeedbackLufs.store(-23.0f); // exactly at target -- gain shouldn't drift from the seeded value
     LevelerStep step(sampleRate, +testFeedbackFn, std::make_shared<DiagnosticCsvLogger>(), seededGainDb, seededIntegralErrorDb);
 
     if (std::abs(step.getCurrentGainDb() - seededGainDb) > TOLERANCE_DB ||
@@ -206,15 +213,38 @@ bool levelerCanBeSeededWithSavedGain()
 
     std::unique_ptr<short[]> rawInput(generateOneSecondSineWave(1000.0f, sampleRate));
     std::vector<short> inputVec(rawInput.get(), rawInput.get() + sampleRate);
+    double inputRms = measureRms(inputVec);
 
+    // First block (100ms) falls entirely within the 300ms ramp-in window --
+    // actual applied gain should be well below the seeded value here. This
+    // is the specific real-world failure this ramp fixes: a persisted
+    // gain applied in full from sample one, stacking with
+    // CompressorLimiterStep's own gain-reduction envelope also starting
+    // cold, was confirmed (via a real capture) to push an otherwise-safe
+    // first syllable to true 0dBFS.
     int numOutputSamples = 0;
     short* result = step.execute(inputVec.data(), sampleRate / 10, &numOutputSamples);
-    std::vector<short> output(result, result + numOutputSamples);
-
-    double firstBlockGainDb = 20.0 * std::log10(measureRms(output) / measureRms(inputVec));
-    if (std::abs(firstBlockGainDb - seededGainDb) > TOLERANCE_DB)
+    double firstBlockGainDb = 20.0 * std::log10(measureRms(std::vector<short>(result, result + numOutputSamples)) / inputRms);
+    if (firstBlockGainDb > seededGainDb - 3.0)
     {
-        std::cerr << "[first block's actual gain was " << firstBlockGainDb << "dB, expected ~" << seededGainDb
+        std::cerr << "[first (ramping-in) block's gain was " << firstBlockGainDb << "dB, expected it well below the seeded "
+                   << seededGainDb << "dB -- ramp-in doesn't seem to be reducing applied gain at startup]...";
+        return false;
+    }
+
+    // Run well past the 300ms ramp window (five more 100ms blocks) -- gain
+    // should have converged back to (approximately) the seeded value,
+    // since feedback has been held exactly at target throughout.
+    std::vector<short> lastOutput;
+    for (int block = 0; block < 5; block++)
+    {
+        result = step.execute(inputVec.data(), sampleRate / 10, &numOutputSamples);
+        lastOutput.assign(result, result + numOutputSamples);
+    }
+    double convergedGainDb = 20.0 * std::log10(measureRms(lastOutput) / inputRms);
+    if (std::abs(convergedGainDb - seededGainDb) > TOLERANCE_DB)
+    {
+        std::cerr << "[gain after the ramp window was " << convergedGainDb << "dB, expected ~" << seededGainDb
                    << "dB from the seeded starting point]...";
         return false;
     }

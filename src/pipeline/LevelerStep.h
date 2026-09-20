@@ -90,6 +90,11 @@ private:
     // consistent avoids a discontinuous jump in target at the start of a
     // new transmission.
     float integralErrorDb_;
+    // Startup ramp-in (2026-09-20) -- see execute()'s own comment on why
+    // this exists. Tracks real elapsed processing time since construction;
+    // only needed for the first STARTUP_RAMP_SEC of a session's life, after
+    // which it's left to grow unused (harmless).
+    float sessionElapsedSec_;
     std::unique_ptr<short[]> outputSamples_;
     std::shared_ptr<DiagnosticCsvLogger> diagLogger_;
 };

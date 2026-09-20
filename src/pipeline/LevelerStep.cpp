@@ -83,6 +83,25 @@ constexpr float LEVELER_INTEGRAL_TIME_CONSTANT_SEC = 4.0f;
 
 constexpr int TEN_MS_DIVIDER = 100;
 
+// Startup ramp-in (2026-09-20, Barry -- found via a real capture): applying
+// a seeded, persisted currentGainDb_ (see the constructor's own comment)
+// in full from sample one stacks with CompressorLimiterStep's own
+// gain-reduction envelope *also* starting cold (0dB reduction) at the
+// exact same moment -- a genuinely loud first syllable gets the full
+// persisted boost before the limiter's fast (but not instant) attack has
+// had any real audio to react to. Confirmed on a real capture: a first
+// syllable that peaked around -5dBFS raw (safely below clipping on its
+// own) touched true 0dBFS after a persisted +5.25dB was applied
+// instantly, while every later syllable at similar raw levels stayed
+// comfortably clear once the limiter had "warmed up". A fresh (non-seeded)
+// session doesn't need this: currentGainDb_ starts at 0dB and can't move
+// far in under a second thanks to LEVELER_TIME_CONSTANT_SEC, so this ramp
+// is a no-op there. 300ms is fast enough to be inaudible against any real
+// speech onset, but gives the limiter's per-sample envelope (2-5ms attack)
+// dozens of reaction cycles on real, gradually-increasing gain before the
+// full persisted value ever lands.
+constexpr float STARTUP_RAMP_SEC = 0.3f;
+
 LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
                          float initialGainDb, float initialIntegralErrorDb)
     : sampleRate_(sampleRate)
@@ -90,6 +109,7 @@ LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLou
     , targetGainDb_(initialGainDb)
     , currentGainDb_(initialGainDb)
     , integralErrorDb_(initialIntegralErrorDb)
+    , sessionElapsedSec_(0.0f)
     , diagLogger_(diagLogger)
 {
     // Pre-allocate buffers so we don't have to do so during real-time operation.
@@ -133,11 +153,17 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
         // chasing it, same as AgcStep's original silence-gating behavior.
         float feedbackLufs = feedbackLoudnessLufsFn_();
         bool feedbackValid = feedbackLufs > SILENCE_THRESHOLD_LUFS;
+        float blockDurationSec = (float)chunkSize / sampleRate_;
+
+        // Startup ramp-in bookkeeping -- must advance every block
+        // regardless of feedbackValid (real time keeps passing during the
+        // initial EBU R128 warm-up/silence too, and that's exactly the
+        // window this ramp needs to cover). See STARTUP_RAMP_SEC's own
+        // comment above.
+        sessionElapsedSec_ += blockDurationSec;
 
         if (feedbackValid)
         {
-            float blockDurationSec = (float)chunkSize / sampleRate_;
-
             // Step 2: calculate target gain -- PI controller (2026-09-18).
             //
             // feedbackLufs is measured on the *output* of the compressor/
@@ -213,8 +239,17 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
             currentGainDb_ += ((targetGainDb_ - currentGainDb_) / LEVELER_TIME_CONSTANT_SEC) * blockDurationSec;
         }
 
-        // Scale samples based on current gain.
-        float scaleFactor = expf(currentGainDb_ / 20.0f * logf(10.0f));
+        // Scale samples based on current gain -- ramped in over
+        // STARTUP_RAMP_SEC of real elapsed time since construction (a
+        // no-op once past it, and effectively a no-op for a fresh,
+        // non-seeded session too, since currentGainDb_ can't move far from
+        // 0 in under a second anyway). Deliberately doesn't touch
+        // currentGainDb_ itself -- the PI controller's own state keeps
+        // evolving normally underneath; only the actually-*applied* gain
+        // is held back at the very start.
+        float rampInFactor = std::min(1.0f, sessionElapsedSec_ / STARTUP_RAMP_SEC);
+        float appliedGainDb = currentGainDb_ * rampInFactor;
+        float scaleFactor = expf(appliedGainDb / 20.0f * logf(10.0f));
         double peakAbs = 0.0;
         float temp = 0.0f;
         for (int i = 0; i < chunkSize; i++)
