@@ -62,7 +62,7 @@ public:
     DiagnosticCsvLogger();
     ~DiagnosticCsvLogger();
 
-    void logLevelerHalf(double inputDbfs, double feedbackLufs, double targetGainDb, double currentGainDb) FREEDV_NONBLOCKING;
+    void logLevelerHalf(double inputDbfs, double feedbackLufs, double targetGainDb, double currentGainDb, double appliedGainDb) FREEDV_NONBLOCKING;
     void logCompressorLimiterHalfAndFlush(double gainReductionDb, double outputDbfs) FREEDV_NONBLOCKING;
 
 private:
@@ -72,6 +72,13 @@ private:
         double feedbackLufs;
         double targetGainDb;
         double currentGainDb;
+        // appliedGainDb (2026-09-20): the gain actually applied to samples,
+        // as distinct from currentGainDb -- normally identical, but differs
+        // during LevelerStep's startup ramp-in (see STARTUP_RAMP_SEC in
+        // LevelerStep.cpp), added specifically so that ramp is directly
+        // visible on the graph rather than something to infer indirectly
+        // from the input/output level panel.
+        double appliedGainDb;
     };
 
     // Generous fixed capacity (no heap allocation -- keeps this honestly

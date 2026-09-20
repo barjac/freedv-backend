@@ -39,7 +39,7 @@ DiagnosticCsvLogger::DiagnosticCsvLogger()
         file_ = fopen(path.c_str(), "w");
         if (file_ != nullptr)
         {
-            fprintf(file_, "elapsed_ms,input_dbfs,feedback_lufs,leveler_target_gain_db,leveler_current_gain_db,comp_limiter_gain_reduction_db,output_dbfs\n");
+            fprintf(file_, "elapsed_ms,input_dbfs,feedback_lufs,leveler_target_gain_db,leveler_current_gain_db,leveler_applied_gain_db,comp_limiter_gain_reduction_db,output_dbfs\n");
             fflush(file_);
         }
     }
@@ -57,7 +57,7 @@ DiagnosticCsvLogger::~DiagnosticCsvLogger()
     }
 }
 
-void DiagnosticCsvLogger::logLevelerHalf(double inputDbfs, double feedbackLufs, double targetGainDb, double currentGainDb) FREEDV_NONBLOCKING
+void DiagnosticCsvLogger::logLevelerHalf(double inputDbfs, double feedbackLufs, double targetGainDb, double currentGainDb, double appliedGainDb) FREEDV_NONBLOCKING
 {
     if (file_ == nullptr) return;
 
@@ -70,7 +70,7 @@ void DiagnosticCsvLogger::logLevelerHalf(double inputDbfs, double feedbackLufs, 
     }
 
     int tail = (pendingHead_ + pendingCount_) % PENDING_QUEUE_CAPACITY;
-    pendingQueue_[tail] = PendingRow{inputDbfs, feedbackLufs, targetGainDb, currentGainDb};
+    pendingQueue_[tail] = PendingRow{inputDbfs, feedbackLufs, targetGainDb, currentGainDb, appliedGainDb};
     pendingCount_++;
 }
 
@@ -90,9 +90,9 @@ void DiagnosticCsvLogger::logCompressorLimiterHalfAndFlush(double gainReductionD
     // Same rationale/precedent as AgcStep.cpp's own diagnostic log on the
     // bcj-agc-diagnostic-log branch.
     FREEDV_BEGIN_VERIFIED_SAFE
-    fprintf(file_, "%lld,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+    fprintf(file_, "%lld,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
         (long long)elapsedMs, row.inputDbfs, row.feedbackLufs,
-        row.targetGainDb, row.currentGainDb, gainReductionDb, outputDbfs);
+        row.targetGainDb, row.currentGainDb, row.appliedGainDb, gainReductionDb, outputDbfs);
     fflush(file_);
     FREEDV_END_VERIFIED_SAFE
 }
