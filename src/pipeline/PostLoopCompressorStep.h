@@ -37,6 +37,8 @@
 #ifndef AUDIO_PIPELINE__POST_LOOP_COMPRESSOR_STEP_H
 #define AUDIO_PIPELINE__POST_LOOP_COMPRESSOR_STEP_H
 
+#include <chrono>
+#include <cstdio>
 #include <memory>
 
 #include "IPipelineStep.h"
@@ -69,6 +71,22 @@
 // applied directly to level, no separate makeup-gain term anywhere in the
 // signal path) -- maximum gain is unity, per Richard's original spec
 // constraint and Barry's explicit requirement here.
+//
+// DIAGNOSTIC ONLY (2026-09-21): writes its own small CSV
+// (~/postloop_compressor_diag.csv, only when built with
+// -DENABLE_AUDIO_DIAG_LOGGING=ON, otherwise a no-op) -- deliberately a
+// separate file via its own private fopen/fprintf, NOT routed through the
+// shared DiagnosticCsvLogger used by LevelerStep/CompressorLimiterStep.
+// Found the need for this the hard way: a first A/B test comparing two
+// captures with this stage toggled on vs. off showed no difference at all
+// in ~/agc_diag.csv, because that file's own output_dbfs/gain-reduction
+// columns are written by CompressorLimiterStep *before* this stage ever
+// runs -- this stage's own action was completely invisible regardless of
+// its setting. Keeping this as a genuinely separate file (rather than
+// extending the shared logger's row schema again) avoids any change to
+// CompressorLimiterStep.cpp's own already-tested logging call, for the
+// same "can't touch the existing loop" reason the rest of this class is
+// standalone.
 class PostLoopCompressorStep : public IPipelineStep
 {
 public:
@@ -98,6 +116,10 @@ private:
     float releaseAlpha_;
 
     std::unique_ptr<short[]> outputSamples_;
+
+    // DIAGNOSTIC ONLY -- see class comment above.
+    FILE* diagFile_;
+    std::chrono::steady_clock::time_point diagStartTime_;
 };
 
 #endif // AUDIO_PIPELINE__POST_LOOP_COMPRESSOR_STEP_H

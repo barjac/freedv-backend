@@ -37,8 +37,11 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
+#include <string>
 
 #include "PostLoopCompressorStep.h"
+#include "freedv_sanitizers.h"
 
 // Same values as the original (pre-2026-09-18) two-knee design in
 // CompressorLimiterStep.cpp -- starting points for live A/B tuning via
@@ -104,6 +107,7 @@ PostLoopCompressorStep::PostLoopCompressorStep(int sampleRate)
     , lookAheadBuffer_(std::make_unique<float[]>(lookAheadLength_)) // value-initialized (zeroed)
     , lookAheadPos_(0)
     , smoothedGainReductionDb_(0.0f)
+    , diagFile_(nullptr)
 {
     assert(lookAheadBuffer_ != nullptr);
 
@@ -116,11 +120,41 @@ PostLoopCompressorStep::PostLoopCompressorStep(int sampleRate)
     float dt = 1.0f / sampleRate_;
     attackAlpha_ = 1.0f - expf(-dt / ATTACK_TIME_SEC);
     releaseAlpha_ = 1.0f - expf(-dt / RELEASE_TIME_SEC);
+
+    // DIAGNOSTIC ONLY -- see class comment in the header. Own file, own
+    // fopen -- deliberately not routed through DiagnosticCsvLogger.
+#if defined(FREEDV_ENABLE_AUDIO_DIAG_LOGGING)
+    const char* home = std::getenv("HOME");
+    if (home != nullptr)
+    {
+        std::string path = std::string(home) + "/postloop_compressor_diag.csv";
+        diagFile_ = fopen(path.c_str(), "w");
+        if (diagFile_ != nullptr)
+        {
+            // encoder_input_dbfs, not output_dbfs (2026-09-21, Barry:
+            // "That measurement should have been the encoder input") --
+            // this stage genuinely is the last thing to touch the signal
+            // before freedvInterface.createTransmitPipeline() (the actual
+            // RADE encoder call) in TxRxThread.cpp; nothing after it but
+            // non-modifying taps. Naming it plainly avoids the same stale-
+            // label confusion the shared ~/agc_diag.csv's own
+            // "output_dbfs"/"Input to Encoder" legend now has, now that
+            // this stage sits downstream of what that file measures.
+            fprintf(diagFile_, "elapsed_ms,input_dbfs,gain_reduction_db,encoder_input_dbfs\n");
+            fflush(diagFile_);
+        }
+    }
+#endif // defined(FREEDV_ENABLE_AUDIO_DIAG_LOGGING)
+    diagStartTime_ = std::chrono::steady_clock::now();
 }
 
 PostLoopCompressorStep::~PostLoopCompressorStep()
 {
-    // empty
+    if (diagFile_ != nullptr)
+    {
+        fclose(diagFile_);
+        diagFile_ = nullptr;
+    }
 }
 
 int PostLoopCompressorStep::getInputSampleRate() const FREEDV_NONBLOCKING
@@ -145,11 +179,15 @@ short* PostLoopCompressorStep::execute(short* inputSamples, int numInputSamples,
     while (remaining > 0)
     {
         int chunkSize = std::min(remaining, tenMsSamples);
+        double peakInAbs = 0.0;
+        double peakOutAbs = 0.0;
 
         for (int i = 0; i < chunkSize; i++)
         {
             float currentSample = 0.0f;
             ConvertSingleSampleToFloatSampleType_<float, short>(&inPtr[i], &currentSample);
+            double inAbs = std::fabs((double)currentSample);
+            if (inAbs > peakInAbs) peakInAbs = inAbs;
 
             // Step 1: per-sample envelope detection on the *pre-delay*
             // signal, same as CompressorLimiterStep.
@@ -181,6 +219,28 @@ short* PostLoopCompressorStep::execute(short* inputSamples, int numInputSamples,
             float scaleFactor = expf(smoothedGainReductionDb_ / 20.0f * logf(10.0f));
             float outSampleFloat = delayedSample * scaleFactor;
             ConvertSingleSampleToIntSampleType_<short, float>(&outSampleFloat, &outPtr[i]);
+
+            double outAbs = std::fabs((double)outPtr[i]) / 32768.0;
+            if (outAbs > peakOutAbs) peakOutAbs = outAbs;
+        }
+
+        // DIAGNOSTIC ONLY -- see class comment in the header.
+        if (diagFile_ != nullptr)
+        {
+            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - diagStartTime_).count();
+            // peakInAbs is already normalized (ConvertSingleSampleToFloatSampleType_'s
+            // convention, ~[-1,1]) -- NOT raw int16 magnitude, so no /32768 here
+            // (unlike peakOutAbs above, which is deliberately computed from the
+            // raw post-conversion short).
+            double inputDbfs = peakInAbs > 0.0 ? 20.0 * std::log10(peakInAbs) : -100.0;
+            double encoderInputDbfs = peakOutAbs > 0.0 ? 20.0 * std::log10(peakOutAbs) : -100.0;
+
+            FREEDV_BEGIN_VERIFIED_SAFE
+            fprintf(diagFile_, "%lld,%.2f,%.2f,%.2f\n",
+                (long long)elapsedMs, inputDbfs, (double)smoothedGainReductionDb_, encoderInputDbfs);
+            fflush(diagFile_);
+            FREEDV_END_VERIFIED_SAFE
         }
 
         inPtr += chunkSize;
