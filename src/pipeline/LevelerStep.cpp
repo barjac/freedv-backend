@@ -52,7 +52,20 @@ constexpr float LEVELER_GAIN_LIMIT_DB = 12.0f; // symmetric +/-12dB per spec
 // 2.0s/2.0s, which supersedes the 3.0s value. Not re-derived from scratch for
 // this redesign; carried forward as the known-good starting point.
 constexpr float LEVELER_TIME_CONSTANT_SEC = 2.0f;
-constexpr float SILENCE_THRESHOLD_LUFS = -33.0f;
+// Two thresholds (2026-09-21, Barry: "this is the leveller gain freeze
+// during pauses in speech. It could get chattery in high noise
+// environments when rnnoise is off") -- with RNNoise on, background noise
+// between words/transmissions is suppressed close to true silence, so the
+// original, more sensitive -33 LUFS still correctly freezes gain there.
+// Without it, raw room/mic noise during a pause can stay loud enough to
+// register as "valid" (non-silent) feedback, so the PI controller keeps
+// chasing the noise floor instead of freezing -- audible as gain chatter
+// during pauses. -25 LUFS requires a louder signal before treating
+// anything as real content, so a noisy-but-empty pause is more reliably
+// recognised as silence. Which one applies each block is decided in
+// execute() via noiseReductionEnabledFn_.
+constexpr float SILENCE_THRESHOLD_LUFS_RNNOISE_ON = -33.0f;
+constexpr float SILENCE_THRESHOLD_LUFS_RNNOISE_OFF = -25.0f;
 
 // PI controller integral time constant (2026-09-18) -- see execute()'s
 // "PI controller" comment for the full derivation. Deliberately longer
@@ -131,12 +144,13 @@ constexpr float STARTUP_RAMP_SEC = 0.3f;
 // particularly noisy setup (e.g. RNNoise off with a noisy room or open
 // rig/SDR audio bleeding into the mic path). Only used to decide when the
 // startup ramp-in above should start counting; unrelated to
-// SILENCE_THRESHOLD_LUFS (a *measured loudness* gate on the leveler's
-// feedback, not a raw-peak gate on its input).
+// SILENCE_THRESHOLD_LUFS_RNNOISE_ON/OFF (a *measured loudness* gate on the
+// leveler's feedback, not a raw-peak gate on its input).
 constexpr double REAL_AUDIO_PEAK_THRESHOLD = 0.1; // -20dBFS
 
 LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
-                         float initialGainDb, float initialIntegralErrorDb)
+                         float initialGainDb, float initialIntegralErrorDb,
+                         realtime_fp<bool()> const& noiseReductionEnabledFn)
     : sampleRate_(sampleRate)
     , feedbackLoudnessLufsFn_(feedbackLoudnessLufsFn)
     , targetGainDb_(initialGainDb)
@@ -144,6 +158,7 @@ LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLou
     , integralErrorDb_(initialIntegralErrorDb)
     , rampStarted_(false)
     , rampElapsedSec_(0.0f)
+    , noiseReductionEnabledFn_(noiseReductionEnabledFn)
     , diagLogger_(diagLogger)
 {
     // Pre-allocate buffers so we don't have to do so during real-time operation.
@@ -185,8 +200,11 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
         // silence or that no valid reading is available yet (e.g. right
         // after construction) -- either way, freeze gain rather than
         // chasing it, same as AgcStep's original silence-gating behavior.
+        // Threshold itself depends on RNNoise's live enabled state -- see
+        // SILENCE_THRESHOLD_LUFS_RNNOISE_ON/OFF's own comment above.
         float feedbackLufs = feedbackLoudnessLufsFn_();
-        bool feedbackValid = feedbackLufs > SILENCE_THRESHOLD_LUFS;
+        float silenceThresholdLufs = noiseReductionEnabledFn_() ? SILENCE_THRESHOLD_LUFS_RNNOISE_ON : SILENCE_THRESHOLD_LUFS_RNNOISE_OFF;
+        bool feedbackValid = feedbackLufs > silenceThresholdLufs;
         float blockDurationSec = (float)chunkSize / sampleRate_;
 
         // Raw input peak for this chunk -- needed both for the startup

@@ -27,6 +27,15 @@ float testFeedbackFn() FREEDV_NONBLOCKING
     return g_testFeedbackLufs.load(std::memory_order_relaxed);
 }
 
+// Same idiom, for the RNNoise-enabled state LevelerStep's silence-freeze
+// threshold now depends on (2026-09-21).
+std::atomic<bool> g_testNoiseReductionEnabled{true};
+
+bool testNoiseReductionEnabledFn() FREEDV_NONBLOCKING
+{
+    return g_testNoiseReductionEnabled.load(std::memory_order_relaxed);
+}
+
 // Streams the given signal through the leveler in small chunks, mimicking
 // real-time usage, and returns the concatenated output.
 std::vector<short> runThroughLeveler(LevelerStep& step, std::vector<short>& input, int chunkSize)
@@ -131,6 +140,58 @@ bool levelerFreezesGainWhenFeedbackBelowSilenceThreshold()
         return false;
     }
 
+    return true;
+}
+
+// 2026-09-21, Barry: "this is the leveller gain freeze during pauses in
+// speech. It could get chattery in high noise environments when rnnoise
+// is off." -25 LUFS feedback sits between the two thresholds
+// (SILENCE_THRESHOLD_LUFS_RNNOISE_ON=-33, _OFF=-25 in LevelerStep.cpp) --
+// with RNNoise reported enabled, that's above the freeze point and gain
+// should keep updating; with it reported disabled, that's *at* the freeze
+// point and gain should hold still, exactly the "stop chasing background
+// noise during a pause" behavior this exists for.
+bool levelerFreezesEarlierWhenNoiseReductionDisabled()
+{
+    constexpr int sampleRate = 8000;
+    constexpr double TOLERANCE_DB = 0.01;
+    constexpr float betweenThresholdsLufs = -25.0f;
+
+    std::unique_ptr<short[]> rawInput(generateOneSecondSineWave(1000.0f, sampleRate));
+    std::vector<short> inputVec(rawInput.get(), rawInput.get() + sampleRate);
+
+    // RNNoise reported ON (the default threshold, -33) -- feedback above
+    // it should keep updating gain normally.
+    g_testNoiseReductionEnabled.store(true);
+    g_testFeedbackLufs.store(betweenThresholdsLufs);
+    LevelerStep stepOn(sampleRate, +testFeedbackFn, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, +testNoiseReductionEnabledFn);
+    auto onSnapshot1 = runThroughLeveler(stepOn, inputVec, sampleRate / 10);
+    auto onSnapshot2 = runThroughLeveler(stepOn, inputVec, sampleRate / 10);
+    double onGainDiffDb = 20.0 * std::log10(measureRms(onSnapshot2) / measureRms(onSnapshot1));
+    if (std::abs(onGainDiffDb) < TOLERANCE_DB)
+    {
+        std::cerr << "[gain didn't move at all with RNNoise reported ON and feedback above its -33 threshold -- "
+                   << "test setup problem, or the ON/OFF thresholds got swapped]...";
+        return false;
+    }
+
+    // RNNoise reported OFF (the -25 threshold) -- the same feedback value
+    // now sits at/below it, so gain should hold still.
+    g_testNoiseReductionEnabled.store(false);
+    g_testFeedbackLufs.store(betweenThresholdsLufs);
+    LevelerStep stepOff(sampleRate, +testFeedbackFn, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, +testNoiseReductionEnabledFn);
+    auto offSnapshot1 = runThroughLeveler(stepOff, inputVec, sampleRate / 10);
+    auto offSnapshot2 = runThroughLeveler(stepOff, inputVec, sampleRate / 10);
+    double offGainDiffDb = 20.0 * std::log10(measureRms(offSnapshot2) / measureRms(offSnapshot1));
+    if (std::abs(offGainDiffDb) > TOLERANCE_DB)
+    {
+        std::cerr << "[gain drifted by " << offGainDiffDb << "dB at -25 LUFS feedback with RNNoise reported OFF, "
+                   << "expected it frozen (at/below the -25 threshold)]...";
+        g_testNoiseReductionEnabled.store(true); // reset shared global before returning
+        return false;
+    }
+
+    g_testNoiseReductionEnabled.store(true); // reset shared global -- no other test reads it, but keep tidy
     return true;
 }
 
@@ -318,6 +379,7 @@ int main()
 {
     TEST_CASE(levelerConvergesTowardExpectedGainForQuietFeedback);
     TEST_CASE(levelerFreezesGainWhenFeedbackBelowSilenceThreshold);
+    TEST_CASE(levelerFreezesEarlierWhenNoiseReductionDisabled);
     TEST_CASE(levelerResetPreservesGain);
     TEST_CASE(levelerCanBeSeededWithSavedGain);
     TEST_CASE(levelerRampInWaitsForRealAudioNotJustElapsedTime);

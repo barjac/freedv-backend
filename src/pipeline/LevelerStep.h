@@ -58,8 +58,17 @@ public:
     // GUI's config file) instead of always starting cold at 0dB. Callers
     // that don't care (e.g. existing tests) get the original 0dB/0dB
     // cold-start behavior via the defaults.
+    // noiseReductionEnabledFn (2026-09-21, Barry: "this is the leveller
+    // gain freeze during pauses in speech. It could get chattery in high
+    // noise environments when rnnoise is off") -- queried each block to
+    // pick between two silence-freeze thresholds (see
+    // SILENCE_THRESHOLD_LUFS_RNNOISE_ON/OFF in execute()). Defaults to
+    // "always on" (the original, unconditional -33 LUFS threshold) so
+    // existing callers (tests, freedv-backend's own MinimalTxRxThread.cpp)
+    // are unaffected.
     LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
-                float initialGainDb = 0.0f, float initialIntegralErrorDb = 0.0f);
+                float initialGainDb = 0.0f, float initialIntegralErrorDb = 0.0f,
+                realtime_fp<bool()> const& noiseReductionEnabledFn = +[]() FREEDV_NONBLOCKING { return true; });
     virtual ~LevelerStep();
 
     virtual int getInputSampleRate() const FREEDV_NONBLOCKING override;
@@ -98,6 +107,7 @@ private:
     // protection. rampElapsedSec_ only advances once rampStarted_ is true.
     bool rampStarted_;
     float rampElapsedSec_;
+    realtime_fp<bool()> noiseReductionEnabledFn_;
     std::unique_ptr<short[]> outputSamples_;
     std::shared_ptr<DiagnosticCsvLogger> diagLogger_;
 };
