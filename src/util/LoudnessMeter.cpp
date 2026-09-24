@@ -61,15 +61,29 @@ bool LoudnessMeter::getMomentaryLoudness(double* lufsOut, double silenceFloorLuf
     result = ebur128_loudness_momentary(state, &lufs);
     FREEDV_END_VERIFIED_SAFE
 
+    // TEMPORARY (2026-09-24): always write *lufsOut, even when this
+    // returns false -- lets a caller log the *actual* raw value (clamped
+    // to a finite sentinel, since -HUGE_VAL doesn't round-trip through
+    // %.2f/CSV cleanly) instead of an opaque "invalid" placeholder, to
+    // properly calibrate SILENCE_FLOOR_LUFS_RNNOISE_OFF against real data
+    // rather than guessing at another value blind. Existing callers are
+    // unaffected -- they only read *lufsOut when this returns true, same
+    // as before this change.
+    if (result != EBUR128_SUCCESS)
+    {
+        *lufsOut = -200.0; // no measurement at all (e.g. not enough data yet)
+        return false;
+    }
+    *lufsOut = (lufs == -HUGE_VAL) ? -200.0 : lufs;
+
     // -HUGE_VAL (genuine, unconditional silence) is always rejected
     // regardless of silenceFloorLufs; the floor itself is the caller-
     // supplied, situational cutoff (see the header's own comment).
-    if (result != EBUR128_SUCCESS || lufs == -HUGE_VAL || lufs <= silenceFloorLufs)
+    if (lufs == -HUGE_VAL || lufs <= silenceFloorLufs)
     {
         return false;
     }
 
-    *lufsOut = lufs;
     return true;
 }
 

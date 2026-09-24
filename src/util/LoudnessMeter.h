@@ -38,10 +38,16 @@ public:
 
     void addFrames(const short* samples, int numSamples) FREEDV_NONBLOCKING;
 
-    // Returns true and sets *lufsOut if a valid (non-gated, non-silent)
-    // momentary loudness reading is currently available. Returns false
-    // (leaving *lufsOut untouched) during silence/gating, mirroring
-    // AgcStep's original EBUR128_SUCCESS/-HUGE_VAL check.
+    // Returns true if a valid (non-gated, non-silent) momentary loudness
+    // reading is currently available -- this is the authoritative signal
+    // callers should use to decide whether to trust *lufsOut as real
+    // feedback, mirroring AgcStep's original EBUR128_SUCCESS/-HUGE_VAL
+    // check. *lufsOut is TEMPORARILY (2026-09-24) always written
+    // regardless of the return value, clamped to -200.0 when there's no
+    // real measurement (true silence, or not enough data yet) -- so a
+    // caller can log the raw value for diagnostic calibration even when
+    // it's being rejected. Existing callers that only read *lufsOut when
+    // this returns true (the intended, permanent contract) are unaffected.
     //
     // silenceFloorLufs (2026-09-24, Barry -- found via a real capture: with
     // RNNoise off, genuine gaps between words in a reasonably quiet room

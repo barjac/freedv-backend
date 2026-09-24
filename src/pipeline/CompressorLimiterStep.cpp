@@ -37,6 +37,8 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
+#include <string>
 
 #include "CompressorLimiterStep.h"
 
@@ -143,6 +145,7 @@ CompressorLimiterStep::CompressorLimiterStep(int sampleRate, std::shared_ptr<Dia
     , lookAheadBuffer_(std::make_unique<float[]>(lookAheadLength_)) // value-initialized (zeroed)
     , lookAheadPos_(0)
     , smoothedGainReductionDb_(0.0f)
+    , rawLoudnessDiagFile_(nullptr)
 {
     assert(lookAheadBuffer_ != nullptr);
 
@@ -155,11 +158,32 @@ CompressorLimiterStep::CompressorLimiterStep(int sampleRate, std::shared_ptr<Dia
     float dt = 1.0f / sampleRate_;
     attackAlpha_ = 1.0f - expf(-dt / ATTACK_TIME_SEC);
     releaseAlpha_ = 1.0f - expf(-dt / RELEASE_TIME_SEC);
+
+    // TEMPORARY (2026-09-24) -- see the header's own comment on
+    // rawLoudnessDiagFile_.
+#if defined(FREEDV_ENABLE_AUDIO_DIAG_LOGGING)
+    const char* home = std::getenv("HOME");
+    if (home != nullptr)
+    {
+        std::string path = std::string(home) + "/loudness_meter_diag.csv";
+        rawLoudnessDiagFile_ = fopen(path.c_str(), "w");
+        if (rawLoudnessDiagFile_ != nullptr)
+        {
+            fprintf(rawLoudnessDiagFile_, "elapsed_ms,raw_momentary_lufs,floor_used,accepted\n");
+            fflush(rawLoudnessDiagFile_);
+        }
+    }
+#endif // defined(FREEDV_ENABLE_AUDIO_DIAG_LOGGING)
+    rawLoudnessDiagStartTime_ = std::chrono::steady_clock::now();
 }
 
 CompressorLimiterStep::~CompressorLimiterStep()
 {
-    // empty
+    if (rawLoudnessDiagFile_ != nullptr)
+    {
+        fclose(rawLoudnessDiagFile_);
+        rawLoudnessDiagFile_ = nullptr;
+    }
 }
 
 int CompressorLimiterStep::getInputSampleRate() const FREEDV_NONBLOCKING
@@ -245,7 +269,8 @@ short* CompressorLimiterStep::execute(short* inputSamples, int numInputSamples, 
         loudnessMeter_.addFrames(outPtr, chunkSize);
         double lufs = 0.0;
         double silenceFloorLufs = noiseReductionEnabledFn_() ? SILENCE_FLOOR_LUFS_RNNOISE_ON : SILENCE_FLOOR_LUFS_RNNOISE_OFF;
-        if (loudnessMeter_.getMomentaryLoudness(&lufs, silenceFloorLufs))
+        bool accepted = loudnessMeter_.getMomentaryLoudness(&lufs, silenceFloorLufs);
+        if (accepted)
         {
             lastOutputLoudnessLufs_.store((float)lufs, std::memory_order_relaxed);
         }
@@ -256,6 +281,22 @@ short* CompressorLimiterStep::execute(short* inputSamples, int numInputSamples, 
             // correctly freezes its own gain (see LevelerStep::execute()'s
             // SILENCE_THRESHOLD_LUFS check).
             lastOutputLoudnessLufs_.store(-100.0f, std::memory_order_relaxed);
+        }
+
+        // TEMPORARY (2026-09-24) -- see the header's own comment on
+        // rawLoudnessDiagFile_. lufs is now always populated by
+        // getMomentaryLoudness() (see its own comment), even when accepted
+        // is false, specifically so this can log the real value instead of
+        // an opaque placeholder.
+        if (rawLoudnessDiagFile_ != nullptr)
+        {
+            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - rawLoudnessDiagStartTime_).count();
+            FREEDV_BEGIN_VERIFIED_SAFE
+            fprintf(rawLoudnessDiagFile_, "%lld,%.2f,%.2f,%d\n",
+                (long long)elapsedMs, lufs, silenceFloorLufs, accepted ? 1 : 0);
+            fflush(rawLoudnessDiagFile_);
+            FREEDV_END_VERIFIED_SAFE
         }
 
         // DIAGNOSTIC ONLY (no-op unless built with ENABLE_AUDIO_DIAG_LOGGING).

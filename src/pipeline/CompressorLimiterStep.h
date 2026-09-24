@@ -38,6 +38,8 @@
 #define AUDIO_PIPELINE__COMPRESSOR_LIMITER_STEP_H
 
 #include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <memory>
 
 #include "IPipelineStep.h"
@@ -126,6 +128,17 @@ private:
     std::unique_ptr<short[]> outputSamples_;
 
     static std::atomic<float> lastOutputLoudnessLufs_;
+
+    // TEMPORARY (2026-09-24) -- see execute()'s own comment. A separate,
+    // self-contained diagnostic file (own fopen/fprintf, same pattern as
+    // PostLoopCompressorStep's own diagnostic -- deliberately not routed
+    // through the shared DiagnosticCsvLogger, no schema change needed) to
+    // properly calibrate SILENCE_FLOOR_LUFS_RNNOISE_OFF against the actual
+    // raw momentary LUFS values LoudnessMeter is computing, instead of
+    // continuing to guess at another constant blind. Remove once that's
+    // done.
+    FILE* rawLoudnessDiagFile_;
+    std::chrono::steady_clock::time_point rawLoudnessDiagStartTime_;
 };
 
 #endif // AUDIO_PIPELINE__COMPRESSOR_LIMITER_STEP_H
