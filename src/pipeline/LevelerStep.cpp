@@ -62,15 +62,27 @@ constexpr float LEVELER_TIME_CONSTANT_SEC = 2.0f;
 // environments when rnnoise is off") -- with RNNoise on, background noise
 // between words/transmissions is suppressed close to true silence, so the
 // original, more sensitive -33 LUFS still correctly freezes gain there.
-// Without it, raw room/mic noise during a pause can stay loud enough to
-// register as "valid" (non-silent) feedback, so the PI controller keeps
-// chasing the noise floor instead of freezing -- audible as gain chatter
-// during pauses. -25 LUFS requires a louder signal before treating
-// anything as real content, so a noisy-but-empty pause is more reliably
-// recognised as silence. Which one applies each block is decided in
-// execute() via noiseReductionEnabledFn_.
+// Which one applies each block is decided in execute() via
+// noiseReductionEnabledFn_.
+//
+// _OFF corrected 2026-09-24: the original -25.0f assumed raw room/mic
+// noise during a genuine pause would sit somewhere below it, but real
+// captures the same day (with a persistent PSU fan acoustic noise present)
+// showed ordinary RNNoise-off speech itself routinely measuring below -25
+// -- e.g. one test at a normal, "just below the red" input level measured
+// a -32.31 LUFS median with every reading in the whole transmission below
+// -25, so essentially all real content was being frozen out, not just
+// pauses. Barry then measured the room's own fan-noise-only floor directly
+// from a dedicated silent capture at ~-34 LUFS, close to _ON's existing
+// -33 -- so _OFF is set to match _ON for now: real content's median sits
+// just above -33, giving a workable (if not perfect -- content in the
+// quietest ~25th percentile, e.g. trailing word endings, still falls
+// below it) margin above the measured noise floor, without guessing at an
+// arbitrarily loose value. Revisit if the fan noise is ever addressed at
+// the source, since a quieter room would allow a stricter, more selective
+// threshold here again.
 constexpr float SILENCE_THRESHOLD_LUFS_RNNOISE_ON = -33.0f;
-constexpr float SILENCE_THRESHOLD_LUFS_RNNOISE_OFF = -25.0f;
+constexpr float SILENCE_THRESHOLD_LUFS_RNNOISE_OFF = -33.0f;
 
 // PI controller integral time constant (2026-09-18) -- see execute()'s
 // "PI controller" comment for the full derivation. Deliberately longer
