@@ -66,8 +66,17 @@ public:
     // "always on" (the original, unconditional -33 LUFS threshold) so
     // existing callers (tests, freedv-backend's own MinimalTxRxThread.cpp)
     // are unaffected.
+    // targetLufs (2026-09-24, Barry: real QSO data showed the leveler
+    // riding within ~1dB of its +12dB ceiling for an entire session when
+    // input was gain-staged conservatively for headroom, because -23 LUFS
+    // sits ~7-11dB above where careful gain-staging naturally lands --
+    // "Can we add 'targetLUFS' in the settings to speed testing without
+    // rebuilds?") -- replaces the old fixed LEVELER_TARGET_LUFS constant
+    // as this step's actual target, so a caller (the GUI's config file) can
+    // test different values without a rebuild. Defaults to -23.0f, the
+    // original constant's value, so existing callers are unaffected.
     LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
-                float initialGainDb = 0.0f, float initialIntegralErrorDb = 0.0f,
+                float initialGainDb = 0.0f, float initialIntegralErrorDb = 0.0f, float targetLufs = -23.0f,
                 realtime_fp<bool()> const& noiseReductionEnabledFn = +[]() FREEDV_NONBLOCKING { return true; });
     virtual ~LevelerStep();
 
@@ -107,6 +116,7 @@ private:
     // protection. rampElapsedSec_ only advances once rampStarted_ is true.
     bool rampStarted_;
     float rampElapsedSec_;
+    float targetLufs_;
     realtime_fp<bool()> noiseReductionEnabledFn_;
     std::unique_ptr<short[]> outputSamples_;
     std::shared_ptr<DiagnosticCsvLogger> diagLogger_;

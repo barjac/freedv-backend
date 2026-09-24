@@ -112,6 +112,48 @@ bool levelerConvergesTowardExpectedGainForQuietFeedback()
     return true;
 }
 
+// 2026-09-24: targetLufs is now a constructor param (config-file settable
+// via the GUI, see the header's own comment on why), not a fixed constant
+// -- verify a non-default target genuinely changes what the closed loop
+// converges to, not just that the default (-23.0f) still works.
+bool levelerConvergesTowardConfigurableTarget()
+{
+    constexpr int sampleRate = 8000;
+    constexpr double TOLERANCE_DB = 1.0;
+    constexpr float customTargetLufs = -28.0f; // deliberately not the -23.0f default
+
+    constexpr float trueInputLufs = -33.0f + 0.01f;
+    g_testFeedbackLufs.store(trueInputLufs);
+
+    LevelerStep step(sampleRate, +testFeedbackFn, std::make_shared<DiagnosticCsvLogger>(),
+                      0.0f, 0.0f, customTargetLufs);
+
+    std::unique_ptr<short[]> rawInput(generateOneSecondSineWave(1000.0f, sampleRate));
+    std::vector<short> inputVec(rawInput.get(), rawInput.get() + sampleRate);
+    double inputRms = measureRms(inputVec);
+
+    std::vector<short> lastOutput;
+    for (int second = 0; second < 60; second++)
+    {
+        lastOutput = runThroughLeveler(step, inputVec, sampleRate / 10);
+
+        double chunkGainDb = 20.0 * std::log10(measureRms(lastOutput) / inputRms);
+        g_testFeedbackLufs.store((float)(trueInputLufs + chunkGainDb));
+    }
+
+    double gainDb = 20.0 * std::log10(measureRms(lastOutput) / inputRms);
+    double expectedGainDb = customTargetLufs - trueInputLufs;
+
+    if (std::abs(gainDb - expectedGainDb) > TOLERANCE_DB)
+    {
+        std::cerr << "[gain=" << gainDb << "dB, expected ~" << expectedGainDb
+                   << "dB (converging toward the custom " << customTargetLufs << " LUFS target, not the -23.0f default)]...";
+        return false;
+    }
+
+    return true;
+}
+
 // Once the feedback reading drops below SILENCE_THRESHOLD_LUFS, gain should
 // freeze exactly where it was rather than continuing to update -- mirrors
 // EBU R128's own gating behavior during silence.
@@ -164,7 +206,7 @@ bool levelerFreezesEarlierWhenNoiseReductionDisabled()
     // it should keep updating gain normally.
     g_testNoiseReductionEnabled.store(true);
     g_testFeedbackLufs.store(betweenThresholdsLufs);
-    LevelerStep stepOn(sampleRate, +testFeedbackFn, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, +testNoiseReductionEnabledFn);
+    LevelerStep stepOn(sampleRate, +testFeedbackFn, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, -23.0f, +testNoiseReductionEnabledFn);
     auto onSnapshot1 = runThroughLeveler(stepOn, inputVec, sampleRate / 10);
     auto onSnapshot2 = runThroughLeveler(stepOn, inputVec, sampleRate / 10);
     double onGainDiffDb = 20.0 * std::log10(measureRms(onSnapshot2) / measureRms(onSnapshot1));
@@ -179,7 +221,7 @@ bool levelerFreezesEarlierWhenNoiseReductionDisabled()
     // now sits at/below it, so gain should hold still.
     g_testNoiseReductionEnabled.store(false);
     g_testFeedbackLufs.store(betweenThresholdsLufs);
-    LevelerStep stepOff(sampleRate, +testFeedbackFn, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, +testNoiseReductionEnabledFn);
+    LevelerStep stepOff(sampleRate, +testFeedbackFn, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, -23.0f, +testNoiseReductionEnabledFn);
     auto offSnapshot1 = runThroughLeveler(stepOff, inputVec, sampleRate / 10);
     auto offSnapshot2 = runThroughLeveler(stepOff, inputVec, sampleRate / 10);
     double offGainDiffDb = 20.0 * std::log10(measureRms(offSnapshot2) / measureRms(offSnapshot1));
@@ -378,6 +420,7 @@ bool levelerRampInWaitsForRealAudioNotJustElapsedTime()
 int main()
 {
     TEST_CASE(levelerConvergesTowardExpectedGainForQuietFeedback);
+    TEST_CASE(levelerConvergesTowardConfigurableTarget);
     TEST_CASE(levelerFreezesGainWhenFeedbackBelowSilenceThreshold);
     TEST_CASE(levelerFreezesEarlierWhenNoiseReductionDisabled);
     TEST_CASE(levelerResetPreservesGain);

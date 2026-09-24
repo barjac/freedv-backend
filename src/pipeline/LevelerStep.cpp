@@ -44,7 +44,12 @@
 // release -- proven in earlier live A/B testing that a proportional/
 // time-constant formula (see execute() below) tracks real speech far more
 // smoothly under EBU R128's silence-gating than a fixed dB/sec ramp.
-constexpr float LEVELER_TARGET_LUFS = -23.0f;
+//
+// The target LUFS itself is no longer a fixed constant here (2026-09-24,
+// Barry -- see the constructor's own targetLufs_ comment in the header) --
+// it's the targetLufs_ member, seeded from the constructor's targetLufs
+// param (default -23.0f, this same original value) so it can be set via
+// the GUI's config file without a rebuild.
 constexpr float LEVELER_GAIN_LIMIT_DB = 12.0f; // symmetric +/-12dB per spec
 // 2.0s, per Barry's own prior live-tuning history on the old AgcStep (2026-09-15
 // clarification): 0.5s/6.0s asymmetric -> symmetric 3.0s/3.0s (confirmed
@@ -149,7 +154,7 @@ constexpr float STARTUP_RAMP_SEC = 0.3f;
 constexpr double REAL_AUDIO_PEAK_THRESHOLD = 0.1; // -20dBFS
 
 LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
-                         float initialGainDb, float initialIntegralErrorDb,
+                         float initialGainDb, float initialIntegralErrorDb, float targetLufs,
                          realtime_fp<bool()> const& noiseReductionEnabledFn)
     : sampleRate_(sampleRate)
     , feedbackLoudnessLufsFn_(feedbackLoudnessLufsFn)
@@ -158,6 +163,7 @@ LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLou
     , integralErrorDb_(initialIntegralErrorDb)
     , rampStarted_(false)
     , rampElapsedSec_(0.0f)
+    , targetLufs_(targetLufs)
     , noiseReductionEnabledFn_(noiseReductionEnabledFn)
     , diagLogger_(diagLogger)
 {
@@ -243,8 +249,8 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
             // instantaneous error below is self-referential in exactly the
             // way the original (single-term, proportional-only) formula
             // was: at equilibrium (current==target==G, output==input+G),
-            // G = LEVELER_TARGET_LUFS - (input + G) only has a solution at
-            // G = (LEVELER_TARGET_LUFS - input) / 2 -- half the needed
+            // G = targetLufs_ - (input + G) only has a solution at
+            // G = (targetLufs_ - input) / 2 -- half the needed
             // correction, a permanent steady-state error (confirmed
             // 2026-09-18: current_gain plateaued flat for 16+ seconds at
             // exactly half the implied input deficit).
@@ -275,7 +281,7 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
             // equilibrium (current==target==G, *and* the integral term has
             // stopped changing, which only happens once the instantaneous
             // error is itself zero), solving requires feedbackLufs to reach
-            // LEVELER_TARGET_LUFS exactly -- independent of the
+            // targetLufs_ exactly -- independent of the
             // proportional term's own gain (Kp) or the integral time
             // constant (Ki), which only affect *how fast* it gets there,
             // not the final value. The proportional term still supplies a
@@ -284,7 +290,7 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
             // current-gain lag below) that the pure-integrator attempt
             // above lacked entirely.
             constexpr float KP = 1.0f;
-            float instantErrorDb = LEVELER_TARGET_LUFS - feedbackLufs;
+            float instantErrorDb = targetLufs_ - feedbackLufs;
 
             integralErrorDb_ += instantErrorDb * blockDurationSec;
             // Anti-windup: without this, a long loud or quiet stretch that
