@@ -43,6 +43,7 @@
 #include "IPipelineStep.h"
 #include "../util/LoudnessMeter.h"
 #include "../util/DiagnosticCsvLogger.h"
+#include "../util/realtime_fp.h"
 
 // Soft-knee limiter, replacing WebRtcAgc_Process (which turned out to be a
 // hardcoded ~3:1 compressor with hidden makeup gain, not a limiter -- see
@@ -77,7 +78,19 @@
 class CompressorLimiterStep : public IPipelineStep
 {
 public:
-    CompressorLimiterStep(int sampleRate, std::shared_ptr<DiagnosticCsvLogger> diagLogger);
+    // noiseReductionEnabledFn (2026-09-24, Barry -- found via a real
+    // capture plus an on/off/on/off live test confirming it always
+    // recovers, ruling out a stuck/corrupted state): picks between two
+    // silence floors for the internal LoudnessMeter's momentary reading
+    // (see LoudnessMeter.h's own comment and SILENCE_FLOOR_LUFS_RNNOISE_ON/
+    // OFF in the .cpp) -- with RNNoise off, genuine gaps between words can
+    // read quieter than RNNoise's own small residual noise floor during
+    // the same gaps, invalidating far more real (if quiet) speech than
+    // intended. Defaults to "always on" (the original, unconditional
+    // -70.0f floor) so existing callers (tests, freedv-backend's own
+    // MinimalTxRxThread.cpp) are unaffected.
+    CompressorLimiterStep(int sampleRate, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
+                           realtime_fp<bool()> const& noiseReductionEnabledFn = +[]() FREEDV_NONBLOCKING { return true; });
     virtual ~CompressorLimiterStep();
 
     virtual int getInputSampleRate() const FREEDV_NONBLOCKING override;
@@ -91,6 +104,7 @@ private:
     int sampleRate_;
     LoudnessMeter loudnessMeter_;
     std::shared_ptr<DiagnosticCsvLogger> diagLogger_;
+    realtime_fp<bool()> noiseReductionEnabledFn_;
 
     // Look-ahead delay line: buf_[pos_] always holds the oldest (soon to be
     // overwritten) sample, i.e. the one lookAheadLength_ samples in the

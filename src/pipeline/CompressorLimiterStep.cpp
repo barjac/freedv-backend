@@ -91,6 +91,18 @@ constexpr float LOOKAHEAD_TIME_SEC = 0.004f;
 constexpr float LEVEL_FLOOR_DB = -120.0f; // for log10(0) avoidance
 constexpr int TEN_MS_DIVIDER = 100;
 
+// Two silence floors for LoudnessMeter's momentary reading (2026-09-24,
+// Barry -- see CompressorLimiterStep.h's own constructor comment). -70.0f
+// is LoudnessMeter's original, unconditional default. -85.0f is a starting
+// point for RNNoise-off, chosen to comfortably admit genuinely-present
+// (if quiet) raw speech in real gaps between words without also admitting
+// true digital silence (still rejected separately via the -HUGE_VAL check
+// in LoudnessMeter::getMomentaryLoudness() regardless of this floor) --
+// not yet empirically tuned against a real capture, just picked to be
+// clearly looser than -70 without being unbounded.
+constexpr double SILENCE_FLOOR_LUFS_RNNOISE_ON = -70.0;
+constexpr double SILENCE_FLOOR_LUFS_RNNOISE_OFF = -85.0;
+
 namespace {
 
 // Standard two-parameter soft-knee compressor curve (Giannoulis/Massberg/
@@ -121,10 +133,12 @@ float softKneeGainDb(float levelDb, float thresholdDb, float ratio, float kneeWi
 
 std::atomic<float> CompressorLimiterStep::lastOutputLoudnessLufs_{-100.0f};
 
-CompressorLimiterStep::CompressorLimiterStep(int sampleRate, std::shared_ptr<DiagnosticCsvLogger> diagLogger)
+CompressorLimiterStep::CompressorLimiterStep(int sampleRate, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
+                                              realtime_fp<bool()> const& noiseReductionEnabledFn)
     : sampleRate_(sampleRate)
     , loudnessMeter_(sampleRate)
     , diagLogger_(diagLogger)
+    , noiseReductionEnabledFn_(noiseReductionEnabledFn)
     , lookAheadLength_(std::max(1, (int)std::lround(sampleRate * LOOKAHEAD_TIME_SEC)))
     , lookAheadBuffer_(std::make_unique<float[]>(lookAheadLength_)) // value-initialized (zeroed)
     , lookAheadPos_(0)
@@ -225,10 +239,13 @@ short* CompressorLimiterStep::execute(short* inputSamples, int numInputSamples, 
 
         // Feed this chunk's actual output into the loudness meter --
         // LevelerStep's feedback loop (see getLastOutputLoudnessLufs())
-        // reads whatever this stores below.
+        // reads whatever this stores below. Silence floor depends on
+        // RNNoise's live enabled state -- see
+        // SILENCE_FLOOR_LUFS_RNNOISE_ON/OFF's own comment above.
         loudnessMeter_.addFrames(outPtr, chunkSize);
         double lufs = 0.0;
-        if (loudnessMeter_.getMomentaryLoudness(&lufs))
+        double silenceFloorLufs = noiseReductionEnabledFn_() ? SILENCE_FLOOR_LUFS_RNNOISE_ON : SILENCE_FLOOR_LUFS_RNNOISE_OFF;
+        if (loudnessMeter_.getMomentaryLoudness(&lufs, silenceFloorLufs))
         {
             lastOutputLoudnessLufs_.store((float)lufs, std::memory_order_relaxed);
         }

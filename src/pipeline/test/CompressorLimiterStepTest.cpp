@@ -151,10 +151,68 @@ bool compressorLimiterResetClearsGainReductionState()
     return true;
 }
 
+// 2026-09-24, Barry -- found via a real capture (feedback reading invalid
+// on ~88% of rows despite continuous, clearly-real speech once RNNoise was
+// toggled off), then confirmed non-permanent via a live on/off/on/off
+// test that it always recovers. Root cause: LoudnessMeter's silence floor
+// (-70 LUFS) is tuned for RNNoise-on, where even pauses carry a small
+// residual noise floor; without RNNoise, genuine gaps between words can
+// measure quieter than that, invalidating real (if quiet) speech far more
+// than intended. Verifies getLastOutputLoudnessLufs() actually differs for
+// the *same* quiet-but-real signal depending on the reported RNNoise
+// state -- confirms the floor selection takes effect, not just that the
+// constants exist.
+bool compressorLimiterUsesLooserSilenceFloorWithNoiseReductionOff()
+{
+    constexpr int sampleRate = 8000;
+
+    // A 1kHz full-scale sine's EBU R128 loudness is ~-3.01 LUFS (RMS is
+    // 3dB below peak; K-weighting is close to unity at 1kHz), so scaling
+    // amplitude by 10^((targetLufs - (-3.01))/20) gives roughly that
+    // target LUFS. -78 LUFS sits roughly in the middle of the two floors
+    // (-70 RNNoise-on, -85 RNNoise-off) with a comfortable margin either
+    // side, so this doesn't depend on that approximation being exact.
+    constexpr double approxTargetLufs = -78.0;
+    double amplitude = 32767.0 * std::pow(10.0, (approxTargetLufs - (-3.01)) / 20.0);
+    auto input = generateSineWave(amplitude, 1000.0, 2.0, sampleRate); // long enough for EBU R128's 400ms window to fill
+
+    // RNNoise reported ON -- the original, stricter -70 floor should
+    // reject this quiet signal (getLastOutputLoudnessLufs() stays at its
+    // -100.0f "invalid" default).
+    {
+        CompressorLimiterStep stepOn(sampleRate, std::make_shared<DiagnosticCsvLogger>());
+        runThroughStep(stepOn, input, sampleRate / 10);
+        float lufsOn = CompressorLimiterStep::getLastOutputLoudnessLufs();
+        if (lufsOn > -99.0f)
+        {
+            std::cerr << "[with RNNoise reported ON, getLastOutputLoudnessLufs()=" << lufsOn
+                       << " -- expected it rejected (~-100) by the stricter -70 floor]...";
+            return false;
+        }
+    }
+
+    // RNNoise reported OFF -- the looser -85 floor should accept the same
+    // signal as a genuine (if quiet) reading.
+    {
+        CompressorLimiterStep stepOff(sampleRate, std::make_shared<DiagnosticCsvLogger>(), +[]() FREEDV_NONBLOCKING { return false; });
+        runThroughStep(stepOff, input, sampleRate / 10);
+        float lufsOff = CompressorLimiterStep::getLastOutputLoudnessLufs();
+        if (lufsOff < -85.0f || lufsOff > -50.0f)
+        {
+            std::cerr << "[with RNNoise reported OFF, getLastOutputLoudnessLufs()=" << lufsOff
+                       << " -- expected a genuine reading around " << approxTargetLufs << " LUFS, accepted by the looser -85 floor]...";
+            return false;
+        }
+    }
+
+    return true;
+}
+
 int main()
 {
     TEST_CASE(compressorLimiterLeavesQuietSignalUnaffected);
     TEST_CASE(compressorLimiterReducesGainForLoudSignal);
     TEST_CASE(compressorLimiterResetClearsGainReductionState);
+    TEST_CASE(compressorLimiterUsesLooserSilenceFloorWithNoiseReductionOff);
     return 0;
 }

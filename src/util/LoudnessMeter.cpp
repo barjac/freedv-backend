@@ -28,8 +28,6 @@
 
 #include "ebur128.h" // from libebur128
 
-constexpr double SILENCE_FLOOR_LUFS = -70.0; // libebur128 returns -HUGE_VAL below this; treated as "no valid reading"
-
 LoudnessMeter::LoudnessMeter(int sampleRate)
 {
     ebur128State_ = ebur128_init(1, sampleRate, EBUR128_MODE_M);
@@ -53,7 +51,7 @@ void LoudnessMeter::addFrames(const short* samples, int numSamples) FREEDV_NONBL
     FREEDV_END_VERIFIED_SAFE
 }
 
-bool LoudnessMeter::getMomentaryLoudness(double* lufsOut) const FREEDV_NONBLOCKING
+bool LoudnessMeter::getMomentaryLoudness(double* lufsOut, double silenceFloorLufs) const FREEDV_NONBLOCKING
 {
     ebur128_state* state = static_cast<ebur128_state*>(ebur128State_);
 
@@ -63,7 +61,10 @@ bool LoudnessMeter::getMomentaryLoudness(double* lufsOut) const FREEDV_NONBLOCKI
     result = ebur128_loudness_momentary(state, &lufs);
     FREEDV_END_VERIFIED_SAFE
 
-    if (result != EBUR128_SUCCESS || lufs == -HUGE_VAL || lufs <= SILENCE_FLOOR_LUFS)
+    // -HUGE_VAL (genuine, unconditional silence) is always rejected
+    // regardless of silenceFloorLufs; the floor itself is the caller-
+    // supplied, situational cutoff (see the header's own comment).
+    if (result != EBUR128_SUCCESS || lufs == -HUGE_VAL || lufs <= silenceFloorLufs)
     {
         return false;
     }

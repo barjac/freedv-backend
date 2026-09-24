@@ -42,7 +42,18 @@ public:
     // momentary loudness reading is currently available. Returns false
     // (leaving *lufsOut untouched) during silence/gating, mirroring
     // AgcStep's original EBUR128_SUCCESS/-HUGE_VAL check.
-    bool getMomentaryLoudness(double* lufsOut) const FREEDV_NONBLOCKING;
+    //
+    // silenceFloorLufs (2026-09-24, Barry -- found via a real capture: with
+    // RNNoise off, genuine gaps between words in a reasonably quiet room
+    // can read quieter than RNNoise's own small residual noise floor during
+    // the same gaps, so momentary loudness drops below the default floor
+    // far more often on real, ordinary speech, not just true silence --
+    // confirmed by a live on/off/on/off test that it always recovers, so
+    // this is a real, if surprising, gating difference, not a stuck/
+    // corrupted state). Callers that care can pass a looser value; default
+    // matches the original, always-used -70.0f so existing callers/tests
+    // are unaffected.
+    bool getMomentaryLoudness(double* lufsOut, double silenceFloorLufs = -70.0) const FREEDV_NONBLOCKING;
 
     // No-op: libebur128 has no RT-safe way to clear its internal loudness
     // history (only destroy+reinit, both of which allocate) -- reset() is
