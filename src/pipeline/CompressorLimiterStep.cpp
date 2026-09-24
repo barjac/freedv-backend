@@ -165,7 +165,7 @@ CompressorLimiterStep::CompressorLimiterStep(int sampleRate, std::shared_ptr<Dia
     const char* home = std::getenv("HOME");
     if (home != nullptr)
     {
-        std::string path = std::string(home) + "/loudness_meter_diag.csv";
+        std::string path = std::string(home) + "/freedv-data/loudness_meter_diag.csv";
         rawLoudnessDiagFile_ = fopen(path.c_str(), "w");
         if (rawLoudnessDiagFile_ != nullptr)
         {
