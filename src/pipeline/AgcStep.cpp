@@ -88,7 +88,7 @@ AgcStep::AgcStep(int sampleRate, bool enableLimiter, bool enableLeveler)
         diagCsvFile_ = fopen(path.c_str(), "w");
         if (diagCsvFile_ != nullptr)
         {
-            fprintf(diagCsvFile_, "elapsed_ms,input_dbfs,feedback_lufs,leveler_target_gain_db,leveler_current_gain_db,comp_limiter_gain_reduction_db,output_dbfs\n");
+            fprintf(diagCsvFile_, "elapsed_ms,input_dbfs,feedback_lufs,leveler_target_gain_db,leveler_current_gain_db,leveler_applied_gain_db,comp_limiter_gain_reduction_db,output_dbfs\n");
             fflush(diagCsvFile_);
         }
     }
@@ -310,9 +310,15 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
 
                 auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - diagStartTime_).count();
-                fprintf(diagCsvFile_, "%lld,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+                // leveler_applied_gain_db duplicates leveler_current_gain_db
+                // here -- AgcStep has no separate startup-ramp stage the way
+                // our own LevelerStep does (see its own applied-vs-current
+                // split, 2026-09-20), so currentGainDb_ IS what's applied.
+                // Column still required: agc_diag_wide_plot.py rejects any
+                // capture missing it (added the same day for our own schema).
+                fprintf(diagCsvFile_, "%lld,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
                     (long long)elapsedMs, inputDbfs, feedbackLufs, (double)targetGainDb_, (double)currentGainDb_,
-                    clipReductionDb, outputDbfs);
+                    (double)currentGainDb_, clipReductionDb, outputDbfs);
                 fflush(diagCsvFile_);
             }
 
