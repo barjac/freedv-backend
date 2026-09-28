@@ -36,6 +36,7 @@
 #ifndef AUDIO_PIPELINE__LEVELER_STEP_H
 #define AUDIO_PIPELINE__LEVELER_STEP_H
 
+#include <atomic>
 #include <memory>
 
 #include "IPipelineStep.h"
@@ -94,6 +95,19 @@ public:
     float getCurrentGainDb() const FREEDV_NONBLOCKING { return currentGainDb_; }
     float getIntegralErrorDb() const FREEDV_NONBLOCKING { return integralErrorDb_; }
 
+    // Live gain, for a GUI display polling this *while* execute() is
+    // running concurrently on the pipeline thread (2026-09-28, Barry:
+    // "I would like to add a plot of AGCdB similar to the SNR plot...
+    // something I want to see while transmitting") -- unlike
+    // getCurrentGainDb() above, this is safe to call from another thread
+    // at any time. A static atomic mirror of each block's actually-
+    // applied gain (post startup-ramp, matching the diagnostic CSV's own
+    // "applied_gain_db" column -- what the encoder is really getting,
+    // not the PI controller's pre-ramp internal state), same "exactly
+    // one instance active in the real TX pipeline at a time" assumption
+    // already made by CompressorLimiterStep::getLastOutputLoudnessLufs().
+    static float getLiveAppliedGainDb() FREEDV_NONBLOCKING;
+
 private:
     int sampleRate_;
     realtime_fp<float()> feedbackLoudnessLufsFn_;
@@ -120,6 +134,8 @@ private:
     realtime_fp<bool()> noiseReductionEnabledFn_;
     std::unique_ptr<short[]> outputSamples_;
     std::shared_ptr<DiagnosticCsvLogger> diagLogger_;
+
+    static std::atomic<float> liveAppliedGainDb_;
 };
 
 #endif // AUDIO_PIPELINE__LEVELER_STEP_H

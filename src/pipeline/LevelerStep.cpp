@@ -199,6 +199,13 @@ int LevelerStep::getOutputSampleRate() const FREEDV_NONBLOCKING
     return sampleRate_;
 }
 
+std::atomic<float> LevelerStep::liveAppliedGainDb_{0.0f};
+
+float LevelerStep::getLiveAppliedGainDb() FREEDV_NONBLOCKING
+{
+    return liveAppliedGainDb_.load(std::memory_order_relaxed);
+}
+
 short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOutputSamples) FREEDV_NONBLOCKING
 {
     int tenMsSamples = std::max(1, sampleRate_ / TEN_MS_DIVIDER);
@@ -352,6 +359,9 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
         // DIAGNOSTIC ONLY (no-op unless built with ENABLE_AUDIO_DIAG_LOGGING).
         double inputDbfs = peakAbs > 0.0 ? 20.0 * std::log10(peakAbs) : -100.0;
         diagLogger_->logLevelerHalf(inputDbfs, feedbackValid ? (double)feedbackLufs : -100.0, targetGainDb_, currentGainDb_, (double)appliedGainDb);
+
+        // See getLiveAppliedGainDb()'s own comment.
+        liveAppliedGainDb_.store(appliedGainDb, std::memory_order_relaxed);
 
         inPtr += chunkSize;
         outPtr += chunkSize;
