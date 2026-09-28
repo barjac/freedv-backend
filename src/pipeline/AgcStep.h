@@ -39,6 +39,8 @@
 #include "../util/GenericFIFO.h"
 #include "../3rdparty/WebRTC_AGC/agc.h"
 
+#include <chrono>
+#include <cstdio>
 #include <memory>
 
 class AgcStep : public IPipelineStep
@@ -71,6 +73,26 @@ private:
 
     bool enableLimiter_;
     bool enableLeveler_;
+
+    // COMPARISON-BRANCH ONLY (1485-diag-tests, 2026-09-28) -- writes the
+    // same 7-column schema LevelerStep/CompressorLimiterStep use on
+    // bcj-backend-audio-dev (elapsed_ms,input_dbfs,feedback_lufs,
+    // leveler_target_gain_db,leveler_current_gain_db,
+    // comp_limiter_gain_reduction_db,output_dbfs) so the existing
+    // agc_ptt_capture.sh/agc_diag_wide_plot.py tooling works unchanged
+    // against this branch for a direct before/after comparison. Not
+    // gated behind a CMake option (unlike the other branch) since this
+    // is explicitly a throwaway test branch, never intended to merge --
+    // see PR #1485's own "DO NOT MERGE - TEST BRANCH ONLY".
+    // comp_limiter_gain_reduction_db here is an approximation: the cubic
+    // soft-clip has no single "gain" value the way a real limiter does,
+    // so it's measured as 20*log10(peakOut/peakIn) across just the clip
+    // stage itself (post-leveler, pre-clip vs. post-clip), isolating its
+    // effect from the leveler's own gain the same way the real
+    // CompressorLimiterStep's column isolates its own action.
+    float lastLoggedLufs_;
+    FILE* diagCsvFile_;
+    std::chrono::steady_clock::time_point diagStartTime_;
 };
 
 

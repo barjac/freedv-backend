@@ -35,6 +35,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
+#include <string>
 
 #include "AgcStep.h"
 #include "../util/logging/ulog.h"
@@ -75,7 +77,22 @@ AgcStep::AgcStep(int sampleRate, bool enableLimiter, bool enableLeveler)
     , inputSampleFifo_(MAX_AGC_SAMPLES + 1)
     , enableLimiter_(enableLimiter)
     , enableLeveler_(enableLeveler)
+    , lastLoggedLufs_(-100.0f)
+    , diagCsvFile_(nullptr)
 {
+    // COMPARISON-BRANCH ONLY -- see the header's own comment on diagCsvFile_.
+    const char* home = std::getenv("HOME");
+    if (home != nullptr)
+    {
+        std::string path = std::string(home) + "/agc_diag.csv";
+        diagCsvFile_ = fopen(path.c_str(), "w");
+        if (diagCsvFile_ != nullptr)
+        {
+            fprintf(diagCsvFile_, "elapsed_ms,input_dbfs,feedback_lufs,leveler_target_gain_db,leveler_current_gain_db,comp_limiter_gain_reduction_db,output_dbfs\n");
+            fflush(diagCsvFile_);
+        }
+    }
+    diagStartTime_ = std::chrono::steady_clock::now();
     numSamplesPerRun_ = std::min(MAX_AGC_SAMPLES, sampleRate_ / TEN_MS_DIVIDER); // 10ms blocks, 160 max samples
     assert(numSamplesPerRun_ > 0);
 
@@ -121,6 +138,12 @@ AgcStep::~AgcStep()
     outputSamples_ = nullptr;
     WebRtcAgc_Free(agcState_);
     ebur128_destroy((ebur128_state**)&ebur128State_);
+
+    if (diagCsvFile_ != nullptr)
+    {
+        fclose(diagCsvFile_);
+        diagCsvFile_ = nullptr;
+    }
 }
 
 int AgcStep::getInputSampleRate() const FREEDV_NONBLOCKING
@@ -166,6 +189,15 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
 
             ConvertToFloatSampleType_<float, short>(tmpInput, tmpInputFloat_.get(), numSamplesPerRun_);
 
+            // COMPARISON-BRANCH ONLY -- peak *before* the leveler's gain is
+            // applied, for the diagnostic's input_dbfs column.
+            float peakInAbs = 0.0f;
+            for (auto ctr = 0; ctr < numSamplesPerRun_; ctr++)
+            {
+                float a = std::fabs(tmpInputFloat_[ctr]);
+                if (a > peakInAbs) peakInAbs = a;
+            }
+
             if (enableLeveler_)
             {
                 // Step 1: feed samples into ebur128 every block (cheap -- this is
@@ -200,6 +232,11 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
                         targetGainDb_ = AGC_LOUDNESS_TARGET_LUFS - lufs;
                         if (targetGainDb_ >= AGC_MAX_GAIN_DB) targetGainDb_ = AGC_MAX_GAIN_DB;
                         if (targetGainDb_ <= AGC_MIN_GAIN_DB) targetGainDb_ = AGC_MIN_GAIN_DB;
+
+                        // COMPARISON-BRANCH ONLY -- stash the real measured
+                        // value for the diagnostic row below (lufs itself
+                        // is local to this block and out of scope there).
+                        lastLoggedLufs_ = (float)lufs;
                     }
                 }
     
@@ -235,6 +272,15 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
                 }
             }
 
+            // COMPARISON-BRANCH ONLY -- peak just before the clip stage
+            // (i.e. post-leveler), to isolate the clip's own effect below.
+            float peakPreClipAbs = 0.0f;
+            for (auto ctr = 0; ctr < numSamplesPerRun_; ctr++)
+            {
+                float a = std::fabs(tmpInputFloat_[ctr]);
+                if (a > peakPreClipAbs) peakPreClipAbs = a;
+            }
+
             // Run WebRTC to make sure we don't clip.
             if (enableLimiter_)
             {
@@ -242,6 +288,32 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
                 {
                     tmpInputFloat_[ctr] -= (1.0f/3.0f) * std::pow(tmpInputFloat_[ctr], 3);
                 }
+            }
+
+            // COMPARISON-BRANCH ONLY -- write this block's diagnostic row.
+            // See the header's own comment on diagCsvFile_/lastLoggedLufs_.
+            if (diagCsvFile_ != nullptr)
+            {
+                float peakOutAbs = 0.0f;
+                for (auto ctr = 0; ctr < numSamplesPerRun_; ctr++)
+                {
+                    float a = std::fabs(tmpInputFloat_[ctr]);
+                    if (a > peakOutAbs) peakOutAbs = a;
+                }
+
+                constexpr float LEVEL_FLOOR_DB = -120.0f;
+                double inputDbfs = peakInAbs > 0.0f ? 20.0 * std::log10(peakInAbs) : LEVEL_FLOOR_DB;
+                double outputDbfs = peakOutAbs > 0.0f ? 20.0 * std::log10(peakOutAbs) : LEVEL_FLOOR_DB;
+                double clipReductionDb = (enableLimiter_ && peakPreClipAbs > 0.0f && peakOutAbs > 0.0f)
+                    ? 20.0 * std::log10(peakOutAbs / peakPreClipAbs) : 0.0;
+                double feedbackLufs = lastMeasurementValid_ ? (double)lastLoggedLufs_ : -100.0;
+
+                auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - diagStartTime_).count();
+                fprintf(diagCsvFile_, "%lld,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+                    (long long)elapsedMs, inputDbfs, feedbackLufs, (double)targetGainDb_, (double)currentGainDb_,
+                    clipReductionDb, outputDbfs);
+                fflush(diagCsvFile_);
             }
 
             ConvertToIntSampleType_<short, float>(tmpInputFloat_.get(), tmpOutput, numSamplesPerRun_);
