@@ -30,7 +30,10 @@
 
 LoudnessMeter::LoudnessMeter(int sampleRate)
 {
-    ebur128State_ = ebur128_init(1, sampleRate, EBUR128_MODE_M);
+    // EBUR128_MODE_TRUE_PEAK implies (and is a superset of) EBUR128_MODE_M,
+    // so momentary loudness behaves exactly as before -- this just also
+    // unlocks getLastTruePeakDb() below (2026-09-30, see its own comment).
+    ebur128State_ = ebur128_init(1, sampleRate, EBUR128_MODE_TRUE_PEAK);
     assert(ebur128State_ != nullptr);
 }
 
@@ -85,6 +88,26 @@ bool LoudnessMeter::getMomentaryLoudness(double* lufsOut, double silenceFloorLuf
     }
 
     return true;
+}
+
+double LoudnessMeter::getLastTruePeakDb() const FREEDV_NONBLOCKING
+{
+    ebur128_state* state = static_cast<ebur128_state*>(ebur128State_);
+
+    double truePeak = 0.0;
+    int result;
+    FREEDV_BEGIN_VERIFIED_SAFE
+    // "prev" here means "from the last addFrames() call", i.e. this
+    // block's own true peak -- not the whole session's running max (that's
+    // ebur128_true_peak() instead, deliberately not used here).
+    result = ebur128_prev_true_peak(state, 0, &truePeak);
+    FREEDV_END_VERIFIED_SAFE
+
+    if (result != EBUR128_SUCCESS || truePeak <= 0.0)
+    {
+        return -200.0; // no data yet, or a genuinely silent block
+    }
+    return 20.0 * std::log10(truePeak);
 }
 
 void LoudnessMeter::reset() FREEDV_NONBLOCKING

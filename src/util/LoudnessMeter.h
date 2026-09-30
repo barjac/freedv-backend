@@ -61,6 +61,24 @@ public:
     // are unaffected.
     bool getMomentaryLoudness(double* lufsOut, double silenceFloorLufs = -70.0) const FREEDV_NONBLOCKING;
 
+    // True peak (dBTP) of the most recent addFrames() call, per ITU-R
+    // BS.1770/EBU R128 (2026-09-30, Barry, relaying a suggestion from a
+    // separate chat: "it might be worth looking at a True Peak measurement
+    // ... specifically for feeding the clipper's lookahead/threshold
+    // decision"). For now this is diagnostic-only, not wired into any
+    // control decision -- CompressorLimiterStep's envelope follower needs
+    // a continuously-updated per-sample value, and this is a periodic
+    // (per ~10ms-block) measurement over an oversampled reconstruction,
+    // not a live control signal; making true peak actually *drive* the
+    // limiter would mean oversampling the real signal path around it,
+    // the same cost/benefit already weighed and rejected for this stage's
+    // envelope detector (see CompressorLimiterStep.h's own history).
+    // Used here instead to empirically check whether the existing
+    // -1.5dBFS limiter ceiling leaves enough margin for real inter-sample
+    // overshoot (e.g. from the downstream resampler) rather than guessing.
+    // Returns -200.0 if no data yet or the block was genuinely silent.
+    double getLastTruePeakDb() const FREEDV_NONBLOCKING;
+
     // No-op: libebur128 has no RT-safe way to clear its internal loudness
     // history (only destroy+reinit, both of which allocate) -- reset() is
     // declared FREEDV_NONBLOCKING (see IPipelineStep) so it must not

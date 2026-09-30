@@ -169,7 +169,7 @@ CompressorLimiterStep::CompressorLimiterStep(int sampleRate, std::shared_ptr<Dia
         rawLoudnessDiagFile_ = fopen(path.c_str(), "w");
         if (rawLoudnessDiagFile_ != nullptr)
         {
-            fprintf(rawLoudnessDiagFile_, "elapsed_ms,raw_momentary_lufs,floor_used,accepted\n");
+            fprintf(rawLoudnessDiagFile_, "elapsed_ms,raw_momentary_lufs,floor_used,accepted,sample_peak_dbfs,true_peak_dbtp,true_peak_margin_db\n");
             fflush(rawLoudnessDiagFile_);
         }
     }
@@ -283,24 +283,37 @@ short* CompressorLimiterStep::execute(short* inputSamples, int numInputSamples, 
             lastOutputLoudnessLufs_.store(-100.0f, std::memory_order_relaxed);
         }
 
-        // TEMPORARY (2026-09-24) -- see the header's own comment on
-        // rawLoudnessDiagFile_. lufs is now always populated by
-        // getMomentaryLoudness() (see its own comment), even when accepted
-        // is false, specifically so this can log the real value instead of
-        // an opaque placeholder.
+        double outputDbfs = peakOutAbs > 0.0 ? 20.0 * std::log10(peakOutAbs) : -100.0;
+
+        // TEMPORARY (2026-09-24, extended 2026-09-30) -- see the header's
+        // own comment on rawLoudnessDiagFile_. lufs is now always populated
+        // by getMomentaryLoudness() (see its own comment), even when
+        // accepted is false, specifically so this can log the real value
+        // instead of an opaque placeholder.
+        //
+        // true_peak_dbtp/true_peak_margin_db added 2026-09-30 (Barry,
+        // relaying a suggestion from a separate chat about True Peak
+        // measurement) -- quantifies how much headroom the -1.5dBFS
+        // limiter ceiling actually leaves against real inter-sample
+        // overshoot, rather than trusting the original margin-based
+        // design choice blind. sample_peak_dbfs is outputDbfs (already
+        // computed above); true_peak_margin_db = true_peak - sample_peak,
+        // i.e. how much true peak exceeds simple sample-peak for this
+        // same block -- the actual inter-sample overshoot amount.
         if (rawLoudnessDiagFile_ != nullptr)
         {
+            double truePeakDbtp = loudnessMeter_.getLastTruePeakDb();
             auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - rawLoudnessDiagStartTime_).count();
             FREEDV_BEGIN_VERIFIED_SAFE
-            fprintf(rawLoudnessDiagFile_, "%lld,%.2f,%.2f,%d\n",
-                (long long)elapsedMs, lufs, silenceFloorLufs, accepted ? 1 : 0);
+            fprintf(rawLoudnessDiagFile_, "%lld,%.2f,%.2f,%d,%.2f,%.2f,%.2f\n",
+                (long long)elapsedMs, lufs, silenceFloorLufs, accepted ? 1 : 0,
+                outputDbfs, truePeakDbtp, truePeakDbtp - outputDbfs);
             fflush(rawLoudnessDiagFile_);
             FREEDV_END_VERIFIED_SAFE
         }
 
         // DIAGNOSTIC ONLY (no-op unless built with ENABLE_AUDIO_DIAG_LOGGING).
-        double outputDbfs = peakOutAbs > 0.0 ? 20.0 * std::log10(peakOutAbs) : -100.0;
         diagLogger_->logCompressorLimiterHalfAndFlush(smoothedGainReductionDb_, outputDbfs);
 
         inPtr += chunkSize;
