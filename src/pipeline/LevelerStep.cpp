@@ -276,14 +276,27 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
         // 300ms sits just under that natural floor while remaining well
         // short of a typical sentence-final pause.
         //
-        // Deliberately reuses the *last valid* feedbackLufs (not the
-        // current, possibly-invalid one) for up to this long once
-        // feedback first goes invalid -- the PI update below keeps
-        // running exactly as if that last reading were still current, so
-        // a real, still-progressing correction keeps moving through a
-        // brief gap instead of stalling, without ever actually looking at
-        // whatever the (possibly noise-driven) signal is doing during the
-        // gap itself.
+        // Corrected 2026-09-30, live-tested same day: an earlier version of
+        // this substituted the last valid feedbackLufs back in and let the
+        // *entire* PI update (including integral accumulation) keep
+        // running on it for up to the grace period. That re-derives
+        // targetGainDb_ fresh from a single frozen sample every block --
+        // and real words very often trail off in loudness right before a
+        // breath, so "the last valid reading before a gap" is frequently
+        // an artificially quiet tail, not representative of the word's
+        // real level. Confirmed live: a trailing-off word's last reading
+        // (-31.69 LUFS, well below target) got bridged, and re-running the
+        // integral on that single stale sample for the whole gap drove
+        // targetGainDb_ straight to the +12dB ceiling and dragged gain
+        // *up* during a stretch where the actual transmission trend was
+        // gain needing to come *down* -- the opposite of the intended
+        // "keep the real trend moving" effect.
+        //
+        // Fixed by not re-deriving targetGainDb_ during a gap at all --
+        // see below, gain smoothing continues toward whatever target was
+        // last legitimately computed from real data, without further
+        // integral accumulation from a possibly-unrepresentative sample.
+        bool withinGracePeriod = false;
         if (feedbackValid)
         {
             lastValidFeedbackLufs_ = feedbackLufs;
@@ -292,12 +305,8 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
         else
         {
             invalidFeedbackElapsedSec_ += blockDurationSec;
-            if (lastValidFeedbackLufs_ > NO_VALID_FEEDBACK_YET_SENTINEL_LUFS &&
-                invalidFeedbackElapsedSec_ <= pauseGracePeriodSec_)
-            {
-                feedbackLufs = lastValidFeedbackLufs_;
-                feedbackValid = true;
-            }
+            withinGracePeriod = lastValidFeedbackLufs_ > NO_VALID_FEEDBACK_YET_SENTINEL_LUFS &&
+                                 invalidFeedbackElapsedSec_ <= pauseGracePeriodSec_;
         }
 
         // Raw input peak for this chunk -- needed both for the startup
@@ -395,11 +404,21 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
             targetGainDb_ = KP * instantErrorDb + integralErrorDb_ / LEVELER_INTEGRAL_TIME_CONSTANT_SEC;
             if (targetGainDb_ > LEVELER_GAIN_LIMIT_DB) targetGainDb_ = LEVELER_GAIN_LIMIT_DB;
             if (targetGainDb_ < -LEVELER_GAIN_LIMIT_DB) targetGainDb_ = -LEVELER_GAIN_LIMIT_DB;
+        }
 
-            // Step 3: move current gain a fixed *fraction* of the way toward
-            // target each block, rather than a fixed dB/sec step -- this is
-            // what makes the formula self-compensate for EBU R128's
-            // irregular update opportunities during real speech.
+        // Step 3: move current gain a fixed *fraction* of the way toward
+        // target each block, rather than a fixed dB/sec step -- this is
+        // what makes the formula self-compensate for EBU R128's irregular
+        // update opportunities during real speech. Runs whenever feedback
+        // is genuinely valid *or* we're still within the pause grace
+        // period -- in the grace-period case, targetGainDb_ was NOT
+        // recomputed above (see that block's own comment on why), so this
+        // is coasting toward the last value legitimately derived from real
+        // data, not chasing a fresh (and possibly unrepresentative) one.
+        // Genuinely frozen (gap outlasted the grace period) skips this
+        // entirely -- both target and current gain hold exactly still.
+        if (feedbackValid || withinGracePeriod)
+        {
             currentGainDb_ += ((targetGainDb_ - currentGainDb_) / LEVELER_TIME_CONSTANT_SEC) * blockDurationSec;
         }
 
