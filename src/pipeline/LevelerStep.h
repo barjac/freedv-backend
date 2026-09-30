@@ -130,6 +130,12 @@ private:
     // protection. rampElapsedSec_ only advances once rampStarted_ is true.
     bool rampStarted_;
     float rampElapsedSec_;
+    // Pause grace period (2026-09-30) -- see execute()'s own comment.
+    // lastValidFeedbackLufs_ starts at NO_VALID_FEEDBACK_YET_SENTINEL_LUFS
+    // (LevelerStep.cpp) so the grace period can never substitute an unset
+    // default in for a real reading before any valid feedback has arrived.
+    float lastValidFeedbackLufs_;
+    float invalidFeedbackElapsedSec_;
     float targetLufs_;
     realtime_fp<bool()> noiseReductionEnabledFn_;
     std::unique_ptr<short[]> outputSamples_;

@@ -154,9 +154,12 @@ bool levelerConvergesTowardConfigurableTarget()
     return true;
 }
 
-// Once the feedback reading drops below SILENCE_THRESHOLD_LUFS, gain should
-// freeze exactly where it was rather than continuing to update -- mirrors
-// EBU R128's own gating behavior during silence.
+// Once the feedback reading drops below SILENCE_THRESHOLD_LUFS *and stays
+// there past the pause grace period* (2026-09-30, ~300ms -- see execute()'s
+// own comment), gain should freeze exactly where it was rather than
+// continuing to update -- mirrors EBU R128's own gating behavior during
+// genuine silence. (A gap shorter than the grace period behaves
+// differently -- see levelerBridgesShortGapsViaGracePeriod below.)
 bool levelerFreezesGainWhenFeedbackBelowSilenceThreshold()
 {
     constexpr int sampleRate = 8000;
@@ -170,15 +173,70 @@ bool levelerFreezesGainWhenFeedbackBelowSilenceThreshold()
 
     runThroughLeveler(step, inputVec, sampleRate / 10);
 
-    // Now switch to a reading below the silence gate -- gain should freeze from here.
+    // Switch to a reading below the silence gate and run a full second
+    // through it first -- generously longer than the ~300ms grace period,
+    // so this burn-in absorbs the grace period's own continued drift
+    // before the snapshots below, which then only ever see genuinely
+    // frozen behavior.
     g_testFeedbackLufs.store(-40.0f);
+    runThroughLeveler(step, inputVec, sampleRate / 10);
+
     auto snapshot1 = runThroughLeveler(step, inputVec, sampleRate / 10);
     auto snapshot2 = runThroughLeveler(step, inputVec, sampleRate / 10);
 
     double gainDiffDb = 20.0 * std::log10(measureRms(snapshot2) / measureRms(snapshot1));
     if (std::abs(gainDiffDb) > TOLERANCE_DB)
     {
-        std::cerr << "[gain drifted by " << gainDiffDb << "dB while feedback was below the silence threshold, expected ~0]...";
+        std::cerr << "[gain drifted by " << gainDiffDb << "dB while feedback was below the silence threshold (well past the grace period), expected ~0]...";
+        return false;
+    }
+
+    return true;
+}
+
+// Pause grace period (2026-09-30, Barry: watching the live AGC dB plot,
+// "gain dropping on each utterance but the drop being frozen during the
+// pauses... it would have been beneficial for the decay to continue
+// between words"). A gap *shorter* than PAUSE_GRACE_PERIOD_SEC (~300ms)
+// should NOT freeze gain -- the PI update keeps running using the last
+// valid feedback as if it were still current. Verified by comparing two
+// otherwise-identical runs: one where feedback stays continuously valid,
+// one where it briefly (100ms, well under the grace period) goes invalid
+// partway through -- if the grace period works, both converge to the
+// same final gain, since the PI update runs identically either way.
+bool levelerBridgesShortGapsViaGracePeriod()
+{
+    constexpr int sampleRate = 8000;
+    constexpr double TOLERANCE_DB = 0.01;
+
+    std::unique_ptr<short[]> rawInput(generateOneSecondSineWave(1000.0f, sampleRate));
+    std::vector<short> inputVec(rawInput.get(), rawInput.get() + sampleRate);
+    std::vector<short> shortInputVec(rawInput.get(), rawInput.get() + sampleRate / 10); // 100ms
+
+    // Reference run: feedback stays continuously valid (-25, below target
+    // so gain is still actively converging, not sitting at equilibrium)
+    // throughout, including across the "gap" duration.
+    g_testFeedbackLufs.store(-25.0f);
+    LevelerStep referenceStep(sampleRate, +testFeedbackFn, std::make_shared<DiagnosticCsvLogger>());
+    runThroughLeveler(referenceStep, inputVec, sampleRate / 10);
+    runThroughLeveler(referenceStep, shortInputVec, sampleRate / 10);
+    auto referenceSnapshot = runThroughLeveler(referenceStep, inputVec, sampleRate / 10);
+
+    // Test run: identical, except feedback goes invalid (-40, below the
+    // -33 threshold) for that same 100ms stretch.
+    g_testFeedbackLufs.store(-25.0f);
+    LevelerStep testStep(sampleRate, +testFeedbackFn, std::make_shared<DiagnosticCsvLogger>());
+    runThroughLeveler(testStep, inputVec, sampleRate / 10);
+    g_testFeedbackLufs.store(-40.0f);
+    runThroughLeveler(testStep, shortInputVec, sampleRate / 10);
+    g_testFeedbackLufs.store(-25.0f);
+    auto testSnapshot = runThroughLeveler(testStep, inputVec, sampleRate / 10);
+
+    double gainDiffDb = 20.0 * std::log10(measureRms(testSnapshot) / measureRms(referenceSnapshot));
+    if (std::abs(gainDiffDb) > TOLERANCE_DB)
+    {
+        std::cerr << "[gain differs by " << gainDiffDb << "dB between a continuously-valid run and one with a brief "
+                   << "(100ms, under the ~300ms grace period) gap -- expected the gap to be bridged, not to cause drift]...";
         return false;
     }
 
@@ -434,6 +492,7 @@ int main()
     TEST_CASE(levelerConvergesTowardExpectedGainForQuietFeedback);
     TEST_CASE(levelerConvergesTowardConfigurableTarget);
     TEST_CASE(levelerFreezesGainWhenFeedbackBelowSilenceThreshold);
+    TEST_CASE(levelerBridgesShortGapsViaGracePeriod);
     TEST_CASE(levelerThresholdBehavesTheSameBothWaysNow);
     TEST_CASE(levelerResetPreservesGain);
     TEST_CASE(levelerCanBeSeededWithSavedGain);

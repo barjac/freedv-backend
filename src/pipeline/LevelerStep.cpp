@@ -84,6 +84,17 @@ constexpr float LEVELER_TIME_CONSTANT_SEC = 2.0f;
 constexpr float SILENCE_THRESHOLD_LUFS_RNNOISE_ON = -33.0f;
 constexpr float SILENCE_THRESHOLD_LUFS_RNNOISE_OFF = -33.0f;
 
+// Pause grace period (2026-09-30) -- see its own use in execute() for the
+// full reasoning. Not yet empirically tuned; 300ms is a starting point
+// relative to ebur128_loudness_momentary()'s own 400ms trailing window.
+constexpr float PAUSE_GRACE_PERIOD_SEC = 0.3f;
+// Distinguishes "no valid feedback has ever been seen this session" from
+// "genuinely very quiet" so the grace period never substitutes an unset
+// default in for a real reading -- matches this codebase's usual -200
+// sentinel convention (see LoudnessMeter.h) with a bit of margin either
+// side of it.
+constexpr float NO_VALID_FEEDBACK_YET_SENTINEL_LUFS = -199.0f;
+
 // PI controller integral time constant (2026-09-18) -- see execute()'s
 // "PI controller" comment for the full derivation. Deliberately longer
 // than LEVELER_TIME_CONSTANT_SEC: the integral term's only job is slowly
@@ -175,6 +186,8 @@ LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLou
     , integralErrorDb_(initialIntegralErrorDb)
     , rampStarted_(false)
     , rampElapsedSec_(0.0f)
+    , lastValidFeedbackLufs_(NO_VALID_FEEDBACK_YET_SENTINEL_LUFS)
+    , invalidFeedbackElapsedSec_(0.0f)
     , targetLufs_(targetLufs)
     , noiseReductionEnabledFn_(noiseReductionEnabledFn)
     , diagLogger_(diagLogger)
@@ -231,6 +244,58 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
         float silenceThresholdLufs = noiseReductionEnabledFn_() ? SILENCE_THRESHOLD_LUFS_RNNOISE_ON : SILENCE_THRESHOLD_LUFS_RNNOISE_OFF;
         bool feedbackValid = feedbackLufs > silenceThresholdLufs;
         float blockDurationSec = (float)chunkSize / sampleRate_;
+
+        // Pause grace period (2026-09-30, Barry: watching the live AGC dB
+        // plot after a large quiet-to-normal input-level change, noticed
+        // gain correctly dropping on each utterance but freezing solid
+        // during the gaps between them -- "assuming that the speech could
+        // be expected to carry on at the new normal level then it would
+        // have been beneficial for the decay to continue between words in
+        // this situation"). The freeze itself exists for a real reason
+        // (without RNNoise, background noise between words can read loud
+        // enough to look like valid feedback, so unconditionally trusting
+        // every reading would mean the PI loop chases the noise floor
+        // during genuine gaps) -- but a *still-converging* correction has
+        // nothing to do with noise-chasing: the speaker's actual level
+        // hasn't changed just because they paused for breath, so freezing
+        // through every natural inter-word gap only adds dead time to
+        // convergence for no protective benefit.
+        //
+        // 300ms starting point (not yet empirically tuned): chosen
+        // relative to ebur128_loudness_momentary()'s own 400ms trailing
+        // window, which already gives the *measurement itself* some
+        // inherent bridging of brief gaps for free (a sub-400ms pause
+        // often won't even pull the windowed average below threshold, in
+        // the first place, since the window still contains mostly the
+        // preceding loud speech) -- so a grace period much shorter than
+        // that buys little, while stacking a much longer one *on top* of
+        // that inherent lag would erode the freeze's actual protection.
+        // 300ms sits just under that natural floor while remaining well
+        // short of a typical sentence-final pause.
+        //
+        // Deliberately reuses the *last valid* feedbackLufs (not the
+        // current, possibly-invalid one) for up to this long once
+        // feedback first goes invalid -- the PI update below keeps
+        // running exactly as if that last reading were still current, so
+        // a real, still-progressing correction keeps moving through a
+        // brief gap instead of stalling, without ever actually looking at
+        // whatever the (possibly noise-driven) signal is doing during the
+        // gap itself.
+        if (feedbackValid)
+        {
+            lastValidFeedbackLufs_ = feedbackLufs;
+            invalidFeedbackElapsedSec_ = 0.0f;
+        }
+        else
+        {
+            invalidFeedbackElapsedSec_ += blockDurationSec;
+            if (lastValidFeedbackLufs_ > NO_VALID_FEEDBACK_YET_SENTINEL_LUFS &&
+                invalidFeedbackElapsedSec_ <= PAUSE_GRACE_PERIOD_SEC)
+            {
+                feedbackLufs = lastValidFeedbackLufs_;
+                feedbackValid = true;
+            }
+        }
 
         // Raw input peak for this chunk -- needed both for the startup
         // ramp-in's "has real audio actually started" check below and (as
