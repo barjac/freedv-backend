@@ -76,9 +76,17 @@ public:
     // as this step's actual target, so a caller (the GUI's config file) can
     // test different values without a rebuild. Defaults to -23.0f, the
     // original constant's value, so existing callers are unaffected.
+    // pauseGracePeriodSec (2026-09-30, Barry: "Is the grace period
+    // accessible to change?", after asking to empirically test whether
+    // 300ms is actually enough for a large, still-converging correction
+    // to keep progressing through natural inter-word pauses -- see the
+    // pause grace period's own comment in execute()) -- same rebuild-free
+    // testing pattern as targetLufs above. Defaults to 0.3f, the original
+    // constant's value, so existing callers are unaffected.
     LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
                 float initialGainDb = 0.0f, float initialIntegralErrorDb = 0.0f, float targetLufs = -23.0f,
-                realtime_fp<bool()> const& noiseReductionEnabledFn = +[]() FREEDV_NONBLOCKING { return true; });
+                realtime_fp<bool()> const& noiseReductionEnabledFn = +[]() FREEDV_NONBLOCKING { return true; },
+                float pauseGracePeriodSec = 0.3f);
     virtual ~LevelerStep();
 
     virtual int getInputSampleRate() const FREEDV_NONBLOCKING override;
@@ -136,6 +144,7 @@ private:
     // default in for a real reading before any valid feedback has arrived.
     float lastValidFeedbackLufs_;
     float invalidFeedbackElapsedSec_;
+    float pauseGracePeriodSec_;
     float targetLufs_;
     realtime_fp<bool()> noiseReductionEnabledFn_;
     std::unique_ptr<short[]> outputSamples_;

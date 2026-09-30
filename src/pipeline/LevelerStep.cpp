@@ -85,9 +85,11 @@ constexpr float SILENCE_THRESHOLD_LUFS_RNNOISE_ON = -33.0f;
 constexpr float SILENCE_THRESHOLD_LUFS_RNNOISE_OFF = -33.0f;
 
 // Pause grace period (2026-09-30) -- see its own use in execute() for the
-// full reasoning. Not yet empirically tuned; 300ms is a starting point
-// relative to ebur128_loudness_momentary()'s own 400ms trailing window.
-constexpr float PAUSE_GRACE_PERIOD_SEC = 0.3f;
+// full reasoning. The actual duration is now pauseGracePeriodSec_ (a
+// constructor param, config-file settable -- see the header's own
+// comment), not a fixed constant; 0.3f there remains the default,
+// starting-point value, relative to ebur128_loudness_momentary()'s own
+// 400ms trailing window.
 // Distinguishes "no valid feedback has ever been seen this session" from
 // "genuinely very quiet" so the grace period never substitutes an unset
 // default in for a real reading -- matches this codebase's usual -200
@@ -178,7 +180,7 @@ constexpr double REAL_AUDIO_PEAK_THRESHOLD = 0.1; // -20dBFS
 
 LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
                          float initialGainDb, float initialIntegralErrorDb, float targetLufs,
-                         realtime_fp<bool()> const& noiseReductionEnabledFn)
+                         realtime_fp<bool()> const& noiseReductionEnabledFn, float pauseGracePeriodSec)
     : sampleRate_(sampleRate)
     , feedbackLoudnessLufsFn_(feedbackLoudnessLufsFn)
     , targetGainDb_(initialGainDb)
@@ -188,6 +190,7 @@ LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLou
     , rampElapsedSec_(0.0f)
     , lastValidFeedbackLufs_(NO_VALID_FEEDBACK_YET_SENTINEL_LUFS)
     , invalidFeedbackElapsedSec_(0.0f)
+    , pauseGracePeriodSec_(pauseGracePeriodSec)
     , targetLufs_(targetLufs)
     , noiseReductionEnabledFn_(noiseReductionEnabledFn)
     , diagLogger_(diagLogger)
@@ -290,7 +293,7 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
         {
             invalidFeedbackElapsedSec_ += blockDurationSec;
             if (lastValidFeedbackLufs_ > NO_VALID_FEEDBACK_YET_SENTINEL_LUFS &&
-                invalidFeedbackElapsedSec_ <= PAUSE_GRACE_PERIOD_SEC)
+                invalidFeedbackElapsedSec_ <= pauseGracePeriodSec_)
             {
                 feedbackLufs = lastValidFeedbackLufs_;
                 feedbackValid = true;
