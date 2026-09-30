@@ -84,21 +84,29 @@ void MinimalTxRxThread::initializePipeline_()
     
     if (m_tx)
     {
-        txStep_ = new RADETransmitStep(rade_, encState_);
-        auto diagLogger = std::make_shared<DiagnosticCsvLogger>();
-        auto compressorLimiterStep = new CompressorLimiterStep(txStep_->getInputSampleRate(), diagLogger);
-        auto levelerStep = new LevelerStep(
-            txStep_->getInputSampleRate(),
-            +[]() FREEDV_NONBLOCKING { return CompressorLimiterStep::getLastOutputLoudnessLufs(); },
-            diagLogger);
-        auto rnnoiseStep = new RNNoiseStep();
-        pipeline_->appendPipelineStep(rnnoiseStep);
-        pipeline_->appendPipelineStep(levelerStep);
-        pipeline_->appendPipelineStep(compressorLimiterStep);
+        txStep_ = new RADETransmitStep(rade_, encState_, radeText_);
+
+        if (!disableProcessing_)
+        {
+            auto diagLogger = std::make_shared<DiagnosticCsvLogger>();
+            auto compressorLimiterStep = new CompressorLimiterStep(txStep_->getInputSampleRate(), diagLogger);
+            auto levelerStep = new LevelerStep(
+                txStep_->getInputSampleRate(),
+                +[]() FREEDV_NONBLOCKING { return CompressorLimiterStep::getLastOutputLoudnessLufs(); },
+                diagLogger);
+            auto rnnoiseStep = new RNNoiseStep();
+            pipeline_->appendPipelineStep(rnnoiseStep);
+            pipeline_->appendPipelineStep(levelerStep);
+            pipeline_->appendPipelineStep(compressorLimiterStep);
+        }
+
         pipeline_->appendPipelineStep(txStep_);
         
-        auto levelAdjustStep = new LevelAdjustStep(outputSampleRate_, +[]() FREEDV_NONBLOCKING { return TxScaleFactor_; });
-        pipeline_->appendPipelineStep(levelAdjustStep);
+        if (!disableProcessing_)
+        {
+            auto levelAdjustStep = new LevelAdjustStep(outputSampleRate_, +[]() FREEDV_NONBLOCKING { return TxScaleFactor_; });
+            pipeline_->appendPipelineStep(levelAdjustStep);
+        }
     }
     else
     {
@@ -175,7 +183,7 @@ void* MinimalTxRxThread::Entry()
     
     // Return to normal scheduling
     helper->clearHelperRealTime();
-    
+
     return NULL;
 }
 
