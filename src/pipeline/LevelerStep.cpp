@@ -2,8 +2,8 @@
 // Name:            LevelerStep.cpp
 // Purpose:         Describes a loudness leveler step in the audio pipeline.
 //
-// Authors:         Claude Code (for Barry Jackson, G4MKT), design from
-//                  g4dya (Richard)'s spec on PR #1472
+// Authors:         Claude Code (for Barry Jackson, G4MKT), based on design
+//                  suggestions from g4dya (Richard) on PR #1472
 // License:
 //
 // All rights reserved.
@@ -45,7 +45,7 @@ static_assert(CompressorLimiterStep::INPUT_HEADROOM_DB >= LEVELER_GAIN_LIMIT_DB,
               "limiter input headroom must cover the leveler's maximum gain");
 
 // Smoothing time constant for current gain moving toward target gain.
-// Symmetric (same rise and fall), per the leveler spec.
+// Symmetric (same rise and fall).
 constexpr float LEVELER_TIME_CONSTANT_SEC = 2.0f;
 
 // PI controller. The measured loudness already includes the gain being
