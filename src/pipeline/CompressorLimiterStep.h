@@ -82,6 +82,15 @@ public:
     // the last reading was silent/invalid.
     static float getLastOutputLoudnessLufs() FREEDV_NONBLOCKING;
 
+    // Input level convention: the upstream LevelerStep hands its output
+    // over INPUT_HEADROOM_DB below its true level, and this step restores
+    // it (in floating point) before limiting. Pipeline steps exchange
+    // int16 samples, so without this, peaks the leveler pushes above full
+    // scale would be hard-clipped in the handover before the limiter ever
+    // saw them. Equal to LevelerStep's maximum gain, so the handover can
+    // never clip.
+    static constexpr float INPUT_HEADROOM_DB = 12.0f;
+
 private:
     int sampleRate_;
     LoudnessMeter loudnessMeter_;
@@ -100,6 +109,7 @@ private:
     float smoothedGainReductionDb_;
     float attackAlpha_;
     float releaseAlpha_;
+    float inputHeadroomScale_;
 
     std::unique_ptr<short[]> outputSamples_;
 

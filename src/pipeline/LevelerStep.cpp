@@ -38,8 +38,11 @@
 #include <cmath>
 
 #include "LevelerStep.h"
+#include "CompressorLimiterStep.h"
 
 constexpr float LEVELER_GAIN_LIMIT_DB = 12.0f; // symmetric +/-12dB
+static_assert(CompressorLimiterStep::INPUT_HEADROOM_DB >= LEVELER_GAIN_LIMIT_DB,
+              "limiter input headroom must cover the leveler's maximum gain");
 
 // Smoothing time constant for current gain moving toward target gain.
 // Symmetric (same rise and fall), per the leveler spec.
@@ -213,9 +216,12 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
 
         // Step 4: apply gain, scaled down during the startup ramp-in. Only
         // the applied gain is ramped; the controller state is unaffected.
+        // Output is handed to CompressorLimiterStep INPUT_HEADROOM_DB below
+        // its true level so that positive gain can't clip in the int16
+        // handover; the limiter restores it.
         float rampInFactor = rampStarted_ ? std::min(1.0f, rampElapsedSec_ / STARTUP_RAMP_SEC) : 1.0f;
         float appliedGainDb = currentGainDb_ * rampInFactor;
-        float scaleFactor = expf(appliedGainDb / 20.0f * logf(10.0f));
+        float scaleFactor = expf((appliedGainDb - CompressorLimiterStep::INPUT_HEADROOM_DB) / 20.0f * logf(10.0f));
         float temp = 0.0f;
         for (int i = 0; i < chunkSize; i++)
         {

@@ -116,6 +116,8 @@ CompressorLimiterStep::CompressorLimiterStep(int sampleRate, std::shared_ptr<Dia
     assert(outputSamples_ != nullptr);
 
     // One-pole smoothing coefficients: alpha = 1 - exp(-dt/tau), dt = 1 sample.
+    inputHeadroomScale_ = powf(10.0f, INPUT_HEADROOM_DB / 20.0f);
+
     float dt = 1.0f / sampleRate_;
     attackAlpha_ = 1.0f - expf(-dt / ATTACK_TIME_SEC);
     releaseAlpha_ = 1.0f - expf(-dt / RELEASE_TIME_SEC);
@@ -159,6 +161,7 @@ short* CompressorLimiterStep::execute(short* inputSamples, int numInputSamples, 
         {
             float currentSample = 0.0f;
             ConvertSingleSampleToFloatSampleType_<float, short>(&inPtr[i], &currentSample);
+            currentSample *= inputHeadroomScale_; // restore true level (see INPUT_HEADROOM_DB)
 
             // Step 1: envelope detection on the undelayed signal, so that
             // with the look-ahead delay below, gain starts dropping before

@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "LevelerStep.h"
+#include "CompressorLimiterStep.h"
 #include "PipelineTestCommon.h"
 
 // Unit checks of the gain-control logic against a synthetic feedback value.
@@ -13,6 +14,10 @@
 // logging instead.
 
 namespace {
+
+// LevelerStep hands its output to CompressorLimiterStep INPUT_HEADROOM_DB
+// below true level; add it back when measuring the leveler's gain.
+constexpr double HANDOVER_DB = CompressorLimiterStep::INPUT_HEADROOM_DB;
 
 // realtime_fp<float()> can only hold a plain captureless function pointer
 // (see LevelAdjustStep's own usage precedent), so the synthetic feedback
@@ -87,11 +92,11 @@ bool levelerConvergesTowardExpectedGainForQuietFeedback()
     {
         lastOutput = runThroughLeveler(step, inputVec, sampleRate / 10);
 
-        double chunkGainDb = 20.0 * std::log10(measureRms(lastOutput) / inputRms);
+        double chunkGainDb = 20.0 * std::log10(measureRms(lastOutput) / inputRms) + HANDOVER_DB;
         g_testFeedbackLufs.store((float)(trueInputLufs + chunkGainDb));
     }
 
-    double gainDb = 20.0 * std::log10(measureRms(lastOutput) / inputRms);
+    double gainDb = 20.0 * std::log10(measureRms(lastOutput) / inputRms) + HANDOVER_DB;
     double expectedGainDb = -23.0 - trueInputLufs;
 
     if (std::abs(gainDb - expectedGainDb) > TOLERANCE_DB)
@@ -125,11 +130,11 @@ bool levelerConvergesTowardConfigurableTarget()
     {
         lastOutput = runThroughLeveler(step, inputVec, sampleRate / 10);
 
-        double chunkGainDb = 20.0 * std::log10(measureRms(lastOutput) / inputRms);
+        double chunkGainDb = 20.0 * std::log10(measureRms(lastOutput) / inputRms) + HANDOVER_DB;
         g_testFeedbackLufs.store((float)(trueInputLufs + chunkGainDb));
     }
 
-    double gainDb = 20.0 * std::log10(measureRms(lastOutput) / inputRms);
+    double gainDb = 20.0 * std::log10(measureRms(lastOutput) / inputRms) + HANDOVER_DB;
     double expectedGainDb = customTargetLufs - trueInputLufs;
 
     if (std::abs(gainDb - expectedGainDb) > TOLERANCE_DB)
@@ -227,7 +232,7 @@ bool levelerDoesNotKeepChasingATrailingOffSampleDuringGracePeriod()
     double inputRms = measureRms(inputVec);
 
     runThroughLeveler(step, inputVec, sampleRate / 10); // 1s warm-up, short of full convergence
-    double gainAtGapStart = 20.0 * std::log10(measureRms(runThroughLeveler(step, inputVec, sampleRate / 10)) / inputRms);
+    double gainAtGapStart = 20.0 * std::log10(measureRms(runThroughLeveler(step, inputVec, sampleRate / 10)) / inputRms) + HANDOVER_DB;
 
     // Go invalid for a 200ms gap (well under the default 300ms grace
     // period), sampled in four 50ms slices to see the shape of movement
@@ -241,7 +246,7 @@ bool levelerDoesNotKeepChasingATrailingOffSampleDuringGracePeriod()
     for (int i = 0; i < 4; i++)
     {
         auto sliceOutput = runThroughLeveler(step, sliceInputVec, sampleRate / 10);
-        sliceGainsDb[i] = 20.0 * std::log10(measureRms(sliceOutput) / inputRms);
+        sliceGainsDb[i] = 20.0 * std::log10(measureRms(sliceOutput) / inputRms) + HANDOVER_DB;
         absDeltas[i] = std::abs(sliceGainsDb[i] - prevGain);
         prevGain = sliceGainsDb[i];
     }
@@ -330,7 +335,7 @@ bool levelerResetPreservesGain()
     {
         beforeReset = runThroughLeveler(step, inputVec, sampleRate / 10);
     }
-    double gainBeforeDb = 20.0 * std::log10(measureRms(beforeReset) / measureRms(inputVec));
+    double gainBeforeDb = 20.0 * std::log10(measureRms(beforeReset) / measureRms(inputVec)) + HANDOVER_DB;
 
     step.reset();
 
@@ -338,7 +343,7 @@ bool levelerResetPreservesGain()
     short* result = step.execute(inputVec.data(), sampleRate / 10, &numOutputSamples);
     std::vector<short> output(result, result + numOutputSamples);
 
-    double gainAfterDb = 20.0 * std::log10(measureRms(output) / measureRms(inputVec));
+    double gainAfterDb = 20.0 * std::log10(measureRms(output) / measureRms(inputVec)) + HANDOVER_DB;
     if (std::abs(gainAfterDb - gainBeforeDb) > TOLERANCE_DB)
     {
         std::cerr << "[gain was " << gainBeforeDb << "dB before reset(), " << gainAfterDb
@@ -385,7 +390,7 @@ bool levelerCanBeSeededWithSavedGain()
     // should be well below the seeded value.
     int numOutputSamples = 0;
     short* result = step.execute(inputVec.data(), sampleRate / 10, &numOutputSamples);
-    double firstBlockGainDb = 20.0 * std::log10(measureRms(std::vector<short>(result, result + numOutputSamples)) / inputRms);
+    double firstBlockGainDb = 20.0 * std::log10(measureRms(std::vector<short>(result, result + numOutputSamples)) / inputRms) + HANDOVER_DB;
     if (firstBlockGainDb > seededGainDb - 3.0)
     {
         std::cerr << "[first (ramping-in) block's gain was " << firstBlockGainDb << "dB, expected it well below the seeded "
@@ -401,7 +406,7 @@ bool levelerCanBeSeededWithSavedGain()
         result = step.execute(inputVec.data(), sampleRate / 10, &numOutputSamples);
         lastOutput.assign(result, result + numOutputSamples);
     }
-    double convergedGainDb = 20.0 * std::log10(measureRms(lastOutput) / inputRms);
+    double convergedGainDb = 20.0 * std::log10(measureRms(lastOutput) / inputRms) + HANDOVER_DB;
     if (std::abs(convergedGainDb - seededGainDb) > TOLERANCE_DB)
     {
         std::cerr << "[gain after the ramp window was " << convergedGainDb << "dB, expected ~" << seededGainDb
@@ -440,7 +445,7 @@ bool levelerRampInWaitsForRealAudioNotJustElapsedTime()
 
     int numOutputSamples = 0;
     short* result = step.execute(inputVec.data(), sampleRate / 10, &numOutputSamples);
-    double firstRealBlockGainDb = 20.0 * std::log10(measureRms(std::vector<short>(result, result + numOutputSamples)) / inputRms);
+    double firstRealBlockGainDb = 20.0 * std::log10(measureRms(std::vector<short>(result, result + numOutputSamples)) / inputRms) + HANDOVER_DB;
     if (firstRealBlockGainDb > seededGainDb - 3.0)
     {
         std::cerr << "[first block of real audio (after 3s of prior silence) had gain " << firstRealBlockGainDb

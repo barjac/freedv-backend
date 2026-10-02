@@ -54,9 +54,11 @@
 // with the size of the error and settles on the target rather than moving
 // at a fixed dB/sec rate. Gain holds during pauses in speech.
 //
-// Must be wired upstream of a CompressorLimiterStep in the same pipeline,
-// with feedbackLoudnessLufsFn returning
-// CompressorLimiterStep::getLastOutputLoudnessLufs().
+// Must be wired directly upstream of a CompressorLimiterStep in the same
+// pipeline, with feedbackLoudnessLufsFn returning
+// CompressorLimiterStep::getLastOutputLoudnessLufs(). Output is
+// CompressorLimiterStep::INPUT_HEADROOM_DB below its true level, which
+// the limiter restores.
 class LevelerStep : public IPipelineStep
 {
 public:
