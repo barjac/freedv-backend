@@ -1,8 +1,9 @@
 //=========================================================================
-// Name:            AgcStep.h
-// Purpose:         Describes an AGC step in the audio pipeline.
+// Name:            LoudnessMeter.h
+// Purpose:         Thin libebur128 wrapper for EBU R128 momentary loudness
+//                  measurement (mono).
 //
-// Authors:         Mooneer Salem
+// Authors:         Claude Code (for Barry Jackson, G4MKT)
 // License:
 //
 // All rights reserved.
@@ -32,42 +33,34 @@
 //
 //=========================================================================
 
-#ifndef AUDIO_PIPELINE__AGC_STEP_H
-#define AUDIO_PIPELINE__AGC_STEP_H
+#ifndef UTIL__LOUDNESS_METER_H
+#define UTIL__LOUDNESS_METER_H
 
-#include "IPipelineStep.h"
-#include "../util/GenericFIFO.h"
-#include "../3rdparty/WebRTC_AGC/agc.h"
+#include "freedv_sanitizers.h"
 
-#include <memory>
-
-class AgcStep : public IPipelineStep
+// Mono EBU R128 momentary loudness meter (K-weighted, gated, over the
+// last 400ms -- see libebur128). Used by CompressorLimiterStep to measure
+// its own output for LevelerStep's feedback loop.
+class LoudnessMeter
 {
 public:
-    AgcStep(int sampleRate);
-    virtual ~AgcStep();
-    
-    virtual int getInputSampleRate() const FREEDV_NONBLOCKING override;
-    virtual int getOutputSampleRate() const FREEDV_NONBLOCKING override;
-    virtual short* execute(short* inputSamples, int numInputSamples, int* numOutputSamples) FREEDV_NONBLOCKING override;
-    virtual void reset() FREEDV_NONBLOCKING override;
-    
+    LoudnessMeter(int sampleRate);
+    ~LoudnessMeter();
+
+    void addFrames(const short* samples, int numSamples) FREEDV_NONBLOCKING;
+
+    // Returns true and writes *lufsOut if a valid momentary reading is
+    // available, i.e. there is enough data and the level is above
+    // silenceFloorLufs. Returns false (leaving *lufsOut untouched) on
+    // silence or before the first 400ms window has filled.
+    bool getMomentaryLoudness(double* lufsOut, double silenceFloorLufs = -70.0) const FREEDV_NONBLOCKING;
+
+    // No-op: libebur128 has no way to clear its history without
+    // destroying and reinitialising its state, both of which allocate.
+    void reset() FREEDV_NONBLOCKING;
+
 private:
-    int sampleRate_;
-    float targetGainDb_;
-    float currentGainDb_;
-    WebRtcAgcConfig agcConfig_;
-    void* agcState_;
-
     void* ebur128State_;
-
-    int numSamplesPerRun_;
-    int blocksSinceLoudnessUpdate_;
-    bool lastMeasurementValid_;
-    GenericFIFO<short> inputSampleFifo_;
-    std::unique_ptr<short[]> outputSamples_;
-    std::unique_ptr<short[]> tmpInput_;
 };
 
-
-#endif // AUDIO_PIPELINE__AGC_STEP_H
+#endif // UTIL__LOUDNESS_METER_H

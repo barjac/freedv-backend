@@ -38,12 +38,14 @@ using namespace std::chrono_literals;
 #include "MinimalTxRxThread.h"
 #include "../pipeline/paCallbackData.h"
 
-#include "../../pipeline/AgcStep.h"
+#include "../../pipeline/LevelerStep.h"
+#include "../../pipeline/CompressorLimiterStep.h"
 #include "../../pipeline/RNNoiseStep.h"
 #include "../../pipeline/ResampleStep.h"
 #include "../../pipeline/LevelAdjustStep.h"
 #include "../../pipeline/RADEReceiveStep.h"
 #include "../../pipeline/BandwidthExpandStep.h"
+#include "../../util/DiagnosticCsvLogger.h"
 
 #include "../../util/logging/ulog.h"
 #include "../../os/os_interface.h"
@@ -83,10 +85,16 @@ void MinimalTxRxThread::initializePipeline_()
     if (m_tx)
     {
         txStep_ = new RADETransmitStep(rade_, encState_);
-        auto agcStep = new AgcStep(txStep_->getInputSampleRate());
+        auto diagLogger = std::make_shared<DiagnosticCsvLogger>();
+        auto compressorLimiterStep = new CompressorLimiterStep(txStep_->getInputSampleRate(), diagLogger);
+        auto levelerStep = new LevelerStep(
+            txStep_->getInputSampleRate(),
+            +[]() FREEDV_NONBLOCKING { return CompressorLimiterStep::getLastOutputLoudnessLufs(); },
+            diagLogger);
         auto rnnoiseStep = new RNNoiseStep();
         pipeline_->appendPipelineStep(rnnoiseStep);
-        pipeline_->appendPipelineStep(agcStep);
+        pipeline_->appendPipelineStep(levelerStep);
+        pipeline_->appendPipelineStep(compressorLimiterStep);
         pipeline_->appendPipelineStep(txStep_);
         
         auto levelAdjustStep = new LevelAdjustStep(outputSampleRate_, +[]() FREEDV_NONBLOCKING { return TxScaleFactor_; });
