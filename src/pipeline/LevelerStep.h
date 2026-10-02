@@ -2,8 +2,8 @@
 // Name:            LevelerStep.h
 // Purpose:         Describes a loudness leveler step in the audio pipeline.
 //
-// Authors:         Claude Code (for Barry Jackson, G4MKT), design from
-//                  g4dya (Richard)'s spec on PR #1472
+// Authors:         Claude Code (for Barry Jackson, G4MKT), based on design
+//                  suggestions from g4dya (Richard) on PR #1472
 // License:
 //
 // All rights reserved.
