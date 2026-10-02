@@ -323,6 +323,98 @@ bool compressorLimiterCatchesSuddenOnsets()
     return true;
 }
 
+namespace {
+
+bool disabledFn() FREEDV_NONBLOCKING
+{
+    return false;
+}
+
+// Runs input through a leveler -> limiter chain in 10ms chunks.
+std::vector<short> runThroughChain(LevelerStep& leveler, CompressorLimiterStep& limiter, std::vector<short>& input, int sampleRate)
+{
+    std::vector<short> output;
+    int chunkSize = sampleRate / 100;
+    for (std::size_t offset = 0; offset < input.size(); offset += chunkSize)
+    {
+        int n = static_cast<int>(std::min<std::size_t>(chunkSize, input.size() - offset));
+        int levelerOut = 0;
+        short* levelerResult = leveler.execute(&input[offset], n, &levelerOut);
+        int limiterOut = 0;
+        short* limiterResult = limiter.execute(levelerResult, levelerOut, &limiterOut);
+        output.insert(output.end(), limiterResult, limiterResult + limiterOut);
+    }
+    return output;
+}
+
+} // namespace
+
+// With levelling disabled, a quiet signal should come out of the chain at
+// unity gain (the handover headroom still cancels), and the leveler's saved
+// gain must be left untouched for when it's re-enabled.
+bool levelerDisabledPassesAudioAtUnityAndKeepsState()
+{
+    constexpr int sampleRate = 8000;
+    constexpr float seededGainDb = 6.0f;
+    constexpr double TOLERANCE_DB = 0.2;
+
+    g_chainTestFeedbackLufs.store(-40.0f); // would move gain if the leveler were active
+    auto diagLogger = std::make_shared<DiagnosticCsvLogger>();
+    LevelerStep leveler(sampleRate, +chainTestFeedbackFn, diagLogger, seededGainDb, 24.0f, -23.0f,
+                        +[]() FREEDV_NONBLOCKING { return true; }, +disabledFn);
+    CompressorLimiterStep limiter(sampleRate, diagLogger);
+
+    auto input = generateSineWave(32767.0 * std::pow(10.0, -20.0 / 20.0), 1000.0, 1.0, sampleRate);
+    auto output = runThroughChain(leveler, limiter, input, sampleRate);
+
+    double gainDb = measurePeakDbfs(output, sampleRate / 10) - measurePeakDbfs(input, sampleRate / 10);
+    if (std::abs(gainDb) > TOLERANCE_DB || leveler.getCurrentGainDb() != seededGainDb)
+    {
+        std::cerr << "[chain gain " << gainDb << "dB (expected ~0), leveler gain state " << leveler.getCurrentGainDb()
+                   << "dB (expected unchanged " << seededGainDb << ")]...";
+        return false;
+    }
+
+    return true;
+}
+
+// The limiter must stay effective with levelling disabled: a sudden
+// full-scale onset must stay within the knee curve with no saturated
+// samples.
+bool limiterStaysActiveWithLevelerDisabled()
+{
+    constexpr int sampleRate = 48000;
+    constexpr double EXPECTED_MAX_DB = -1.5 + (0.0 - -1.5) / 20.0;
+    constexpr double TOLERANCE_DB = 0.1;
+
+    auto diagLogger = std::make_shared<DiagnosticCsvLogger>();
+    LevelerStep leveler(sampleRate, +chainTestFeedbackFn, diagLogger, 0.0f, 0.0f, -23.0f,
+                        +[]() FREEDV_NONBLOCKING { return true; }, +disabledFn);
+    CompressorLimiterStep limiter(sampleRate, diagLogger);
+
+    std::vector<short> input(sampleRate / 5, 0);
+    for (int n = 0; n < sampleRate / 5; n++)
+    {
+        input.push_back(static_cast<short>(32767.0 * std::cos(2.0 * M_PI * 300.0 * n / sampleRate)));
+    }
+    auto output = runThroughChain(leveler, limiter, input, sampleRate);
+
+    int saturated = 0;
+    for (short v : output)
+    {
+        if (v >= 32767 || v <= -32767) saturated++;
+    }
+    double outputPeakDb = measurePeakDbfs(output);
+    if (saturated > 0 || outputPeakDb > EXPECTED_MAX_DB + TOLERANCE_DB)
+    {
+        std::cerr << "[output peak " << outputPeakDb << "dBFS (limit " << EXPECTED_MAX_DB << "), "
+                   << saturated << " saturated samples, with the leveler disabled]...";
+        return false;
+    }
+
+    return true;
+}
+
 int main()
 {
     TEST_CASE(compressorLimiterLeavesQuietSignalUnaffected);
@@ -331,5 +423,7 @@ int main()
     TEST_CASE(compressorLimiterUsesLooserSilenceFloorWithNoiseReductionOff);
     TEST_CASE(levelerGainAboveFullScaleIsLimitedNotClipped);
     TEST_CASE(compressorLimiterCatchesSuddenOnsets);
+    TEST_CASE(levelerDisabledPassesAudioAtUnityAndKeepsState);
+    TEST_CASE(limiterStaysActiveWithLevelerDisabled);
     return 0;
 }

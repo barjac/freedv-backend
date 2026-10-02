@@ -82,7 +82,8 @@ constexpr int TEN_MS_DIVIDER = 100;
 
 LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
                          float initialGainDb, float initialIntegralErrorDb, float targetLufs,
-                         realtime_fp<bool()> const& noiseReductionEnabledFn)
+                         realtime_fp<bool()> const& noiseReductionEnabledFn,
+                         realtime_fp<bool()> const& enabledFn)
     : sampleRate_(sampleRate)
     , feedbackLoudnessLufsFn_(feedbackLoudnessLufsFn)
     , targetGainDb_(initialGainDb)
@@ -92,6 +93,7 @@ LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLou
     , rampElapsedSec_(0.0f)
     , targetLufs_(targetLufs)
     , noiseReductionEnabledFn_(noiseReductionEnabledFn)
+    , enabledFn_(enabledFn)
     , diagLogger_(diagLogger)
 {
     // Pre-allocate buffers so we don't have to do so during real-time operation.
@@ -151,7 +153,17 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
             if (absVal > peakAbs) peakAbs = absVal;
         }
 
-        if (!rampStarted_ && peakAbs > REAL_AUDIO_PEAK_THRESHOLD)
+        // While disabled, gain is 0dB and nothing below updates. The ramp
+        // is re-armed so that re-enabling ramps the saved gain back in
+        // rather than stepping it.
+        bool enabled = enabledFn_();
+        if (!enabled)
+        {
+            rampStarted_ = false;
+            rampElapsedSec_ = 0.0f;
+        }
+
+        if (enabled && !rampStarted_ && peakAbs > REAL_AUDIO_PEAK_THRESHOLD)
         {
             rampStarted_ = true;
         }
@@ -160,7 +172,7 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
             rampElapsedSec_ += blockDurationSec;
         }
 
-        if (feedbackValid)
+        if (enabled && feedbackValid)
         {
             // Step 2: PI controller target gain (see LEVELER_KP above).
             float instantErrorDb = targetLufs_ - feedbackLufs;
@@ -181,7 +193,7 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
         // Step 3: move current gain a fraction of the way toward target
         // each block (first-order smoothing), rather than a fixed dB/sec
         // step. Held during pauses.
-        if (feedbackValid)
+        if (enabled && feedbackValid)
         {
             currentGainDb_ += ((targetGainDb_ - currentGainDb_) / LEVELER_TIME_CONSTANT_SEC) * blockDurationSec;
         }
@@ -192,7 +204,7 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
         // its true level so that positive gain can't clip in the int16
         // handover; the limiter restores it.
         float rampInFactor = rampStarted_ ? std::min(1.0f, rampElapsedSec_ / STARTUP_RAMP_SEC) : 1.0f;
-        float appliedGainDb = currentGainDb_ * rampInFactor;
+        float appliedGainDb = enabled ? currentGainDb_ * rampInFactor : 0.0f;
         float scaleFactor = expf((appliedGainDb - CompressorLimiterStep::INPUT_HEADROOM_DB) / 20.0f * logf(10.0f));
         float temp = 0.0f;
         for (int i = 0; i < chunkSize; i++)

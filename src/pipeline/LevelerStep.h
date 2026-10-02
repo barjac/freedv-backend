@@ -58,7 +58,9 @@
 // pipeline, with feedbackLoudnessLufsFn returning
 // CompressorLimiterStep::getLastOutputLoudnessLufs(). Output is
 // CompressorLimiterStep::INPUT_HEADROOM_DB below its true level, which
-// the limiter restores.
+// the limiter restores. To switch levelling off, use enabledFn rather than
+// bypassing this step, so the limiter stays in circuit with a consistent
+// input level.
 class LevelerStep : public IPipelineStep
 {
 public:
@@ -68,9 +70,14 @@ public:
     // targetLufs: loudness target for the output of the limiter.
     // noiseReductionEnabledFn: polled each block to choose the threshold
     //   below which feedback is treated as a pause in speech.
+    // enabledFn: polled each block. While false, gain is 0dB (audio still
+    //   passes through, with the handover headroom, so the downstream
+    //   limiter stays in circuit) and the controller state is frozen, so
+    //   re-enabling resumes from where it was.
     LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
                 float initialGainDb = 0.0f, float initialIntegralErrorDb = 0.0f, float targetLufs = -23.0f,
-                realtime_fp<bool()> const& noiseReductionEnabledFn = +[]() FREEDV_NONBLOCKING { return true; });
+                realtime_fp<bool()> const& noiseReductionEnabledFn = +[]() FREEDV_NONBLOCKING { return true; },
+                realtime_fp<bool()> const& enabledFn = +[]() FREEDV_NONBLOCKING { return true; });
     virtual ~LevelerStep();
 
     virtual int getInputSampleRate() const FREEDV_NONBLOCKING override;
@@ -102,6 +109,7 @@ private:
     float rampElapsedSec_;
     float targetLufs_;
     realtime_fp<bool()> noiseReductionEnabledFn_;
+    realtime_fp<bool()> enabledFn_;
     std::unique_ptr<short[]> outputSamples_;
     std::shared_ptr<DiagnosticCsvLogger> diagLogger_;
 
