@@ -1,23 +1,35 @@
 //=========================================================================
 // Name:            DiagnosticCsvLogger.h
-// Purpose:         DIAGNOSTIC ONLY: shared CSV logger for the leveler/
-//                  compressor-limiter pipeline steps, for live A/B tuning.
+// Purpose:         Diagnostic-only CSV logger for the leveler and
+//                  compressor/limiter pipeline steps.
 //
-// Authors:         Claude Code (for Barry Jones, G4MKT)
+// Authors:         Claude Code (for Barry Jackson, G4MKT)
 // License:
 //
-//  All rights reserved.
+// All rights reserved.
 //
-//  This program is free software; you can redistribute it and/or modify
-//  it under the terms of the GNU General Public License version 2.1,
-//  as published by the Free Software Foundation.  This program is
-//  distributed in the hope that it will be useful, but WITHOUT ANY
-//  WARRANTY; without even the implied warranty of MERCHANTABILITY or
-//  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
-//  License for more details.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
 //
-//  You should have received a copy of the GNU General Public License
-//  along with this program; if not, see <http://www.gnu.org/licenses/>.
+// - Redistributions of source code must retain the above copyright
+// notice, this list of conditions and the following disclaimer.
+//
+// - Redistributions in binary form must reproduce the above copyright
+// notice, this list of conditions and the following disclaimer in the
+// documentation and/or other materials provided with the distribution.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
+// OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+// EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+// PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+// PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+// LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+// NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //
 //=========================================================================
 
@@ -29,33 +41,18 @@
 
 #include "freedv_sanitizers.h"
 
-// DIAGNOSTIC ONLY -- not for production use. Only actually opens/writes
-// anything when built with -DENABLE_AUDIO_DIAG_LOGGING=ON (see top-level
-// CMakeLists.txt); otherwise every call here is a cheap no-op, so it's
-// safe to leave both LevelerStep and CompressorLimiterStep unconditionally
-// wired to a shared instance of this class.
+// Diagnostic only, not for production use. Opens and writes ~/agc_diag.csv
+// only when built with -DENABLE_AUDIO_DIAG_LOGGING=ON (see the top-level
+// CMakeLists.txt); otherwise every call is a cheap no-op, so LevelerStep
+// and CompressorLimiterStep can always be wired to a shared instance.
 //
-// Writes one time-aligned CSV row per ~10ms processing chunk to
-// ~/agc_diag.csv, feeding ~/freedv-scripts/agc_diag_wide_plot.py for live
-// A/B tuning (see the "Replace AgcStep with a Leveler + Compressor/Limiter
-// pair" plan's Verification section).
-//
-// LevelerStep calls logLevelerHalf() once per ~10ms sub-chunk it processes,
-// and CompressorLimiterStep later calls logCompressorLimiterHalfAndFlush()
-// once per matching sub-chunk to complete and write that row. These are
-// NOT a simple alternating pair: within a single AudioPipeline::execute()
-// call, LevelerStep runs its *entire* internal sub-chunk loop (and so
-// calls logLevelerHalf() multiple times in a row) before
-// CompressorLimiterStep is even invoked with that same buffer -- confirmed
-// empirically wiring the two together with realistic (~100ms) chunk sizes,
-// which is exactly why this class queues rows (FIFO) rather than holding a
-// single pending slot; an earlier single-slot version silently dropped all
-// but the last sub-chunk's row per call. Both classes split their input
-// into identical chunk boundaries (see TEN_MS_SAMPLES in each .cpp) and
-// process the exact same total sample count per call (AudioPipeline feeds
-// one step's full output directly as the next step's full input), so the
-// queue always drains to empty by the time both steps finish that call --
-// no explicit synchronization needed between the two owning objects.
+// Writes one row per ~10ms processing chunk. LevelerStep queues the first
+// half of each row via logLevelerHalf(); CompressorLimiterStep completes
+// and writes it via logCompressorLimiterHalfAndFlush(). Rows are queued
+// (FIFO) rather than held in a single slot because LevelerStep processes
+// all chunks of a pipeline buffer before CompressorLimiterStep sees any of
+// them. Both steps use identical chunk boundaries and see the same sample
+// count per call, so the queue drains to empty after each buffer.
 class DiagnosticCsvLogger
 {
 public:
@@ -72,21 +69,14 @@ private:
         double feedbackLufs;
         double targetGainDb;
         double currentGainDb;
-        // appliedGainDb (2026-09-20): the gain actually applied to samples,
-        // as distinct from currentGainDb -- normally identical, but differs
-        // during LevelerStep's startup ramp-in (see STARTUP_RAMP_SEC in
-        // LevelerStep.cpp), added specifically so that ramp is directly
-        // visible on the graph rather than something to infer indirectly
-        // from the input/output level panel.
+        // Differs from currentGainDb only during LevelerStep's startup
+        // ramp-in (see STARTUP_RAMP_SEC in LevelerStep.cpp).
         double appliedGainDb;
     };
 
-    // Generous fixed capacity (no heap allocation -- keeps this honestly
-    // FREEDV_NONBLOCKING even though it's diagnostic-only) -- far more than
-    // the handful of ~10ms sub-chunks any single real-time buffer size
-    // would ever produce in one call. Overflow silently drops the oldest
-    // unflushed row rather than blocking or allocating; diagnostic data
-    // only, never correctness-critical.
+    // Fixed capacity (no allocation in the audio path), far more than the
+    // number of ~10ms chunks in any real buffer. On overflow the oldest
+    // unflushed row is dropped.
     static constexpr int PENDING_QUEUE_CAPACITY = 64;
 
     FILE* file_;

@@ -3,21 +3,33 @@
 // Purpose:         Thin libebur128 wrapper for EBU R128 momentary loudness
 //                  measurement (mono).
 //
-// Authors:         Claude Code (for Barry Jones, G4MKT)
+// Authors:         Claude Code (for Barry Jackson, G4MKT)
 // License:
 //
-//  All rights reserved.
+// All rights reserved.
 //
-//  This program is free software; you can redistribute it and/or modify
-//  it under the terms of the GNU General Public License version 2.1,
-//  as published by the Free Software Foundation.  This program is
-//  distributed in the hope that it will be useful, but WITHOUT ANY
-//  WARRANTY; without even the implied warranty of MERCHANTABILITY or
-//  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
-//  License for more details.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
 //
-//  You should have received a copy of the GNU General Public License
-//  along with this program; if not, see <http://www.gnu.org/licenses/>.
+// - Redistributions of source code must retain the above copyright
+// notice, this list of conditions and the following disclaimer.
+//
+// - Redistributions in binary form must reproduce the above copyright
+// notice, this list of conditions and the following disclaimer in the
+// documentation and/or other materials provided with the distribution.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
+// OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+// EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+// PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+// PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+// LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+// NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //
 //=========================================================================
 
@@ -26,10 +38,9 @@
 
 #include "freedv_sanitizers.h"
 
-// Mono EBU R128 momentary loudness meter (K-weighted RMS over the last
-// 400ms, gated per BS.1770 -- see libebur128). Used by CompressorLimiterStep
-// to measure its own output for LevelerStep's feedback loop (see the
-// "Replace AgcStep with a Leveler + Compressor/Limiter pair" plan).
+// Mono EBU R128 momentary loudness meter (K-weighted, gated, over the
+// last 400ms -- see libebur128). Used by CompressorLimiterStep to measure
+// its own output for LevelerStep's feedback loop.
 class LoudnessMeter
 {
 public:
@@ -38,52 +49,14 @@ public:
 
     void addFrames(const short* samples, int numSamples) FREEDV_NONBLOCKING;
 
-    // Returns true if a valid (non-gated, non-silent) momentary loudness
-    // reading is currently available -- this is the authoritative signal
-    // callers should use to decide whether to trust *lufsOut as real
-    // feedback, mirroring AgcStep's original EBUR128_SUCCESS/-HUGE_VAL
-    // check. *lufsOut is TEMPORARILY (2026-09-24) always written
-    // regardless of the return value, clamped to -200.0 when there's no
-    // real measurement (true silence, or not enough data yet) -- so a
-    // caller can log the raw value for diagnostic calibration even when
-    // it's being rejected. Existing callers that only read *lufsOut when
-    // this returns true (the intended, permanent contract) are unaffected.
-    //
-    // silenceFloorLufs (2026-09-24, Barry -- found via a real capture: with
-    // RNNoise off, genuine gaps between words in a reasonably quiet room
-    // can read quieter than RNNoise's own small residual noise floor during
-    // the same gaps, so momentary loudness drops below the default floor
-    // far more often on real, ordinary speech, not just true silence --
-    // confirmed by a live on/off/on/off test that it always recovers, so
-    // this is a real, if surprising, gating difference, not a stuck/
-    // corrupted state). Callers that care can pass a looser value; default
-    // matches the original, always-used -70.0f so existing callers/tests
-    // are unaffected.
+    // Returns true and writes *lufsOut if a valid momentary reading is
+    // available, i.e. there is enough data and the level is above
+    // silenceFloorLufs. Returns false (leaving *lufsOut untouched) on
+    // silence or before the first 400ms window has filled.
     bool getMomentaryLoudness(double* lufsOut, double silenceFloorLufs = -70.0) const FREEDV_NONBLOCKING;
 
-    // True peak (dBTP) of the most recent addFrames() call, per ITU-R
-    // BS.1770/EBU R128 (2026-09-30, Barry, relaying a suggestion from a
-    // separate chat: "it might be worth looking at a True Peak measurement
-    // ... specifically for feeding the clipper's lookahead/threshold
-    // decision"). For now this is diagnostic-only, not wired into any
-    // control decision -- CompressorLimiterStep's envelope follower needs
-    // a continuously-updated per-sample value, and this is a periodic
-    // (per ~10ms-block) measurement over an oversampled reconstruction,
-    // not a live control signal; making true peak actually *drive* the
-    // limiter would mean oversampling the real signal path around it,
-    // the same cost/benefit already weighed and rejected for this stage's
-    // envelope detector (see CompressorLimiterStep.h's own history).
-    // Used here instead to empirically check whether the existing
-    // -1.5dBFS limiter ceiling leaves enough margin for real inter-sample
-    // overshoot (e.g. from the downstream resampler) rather than guessing.
-    // Returns -200.0 if no data yet or the block was genuinely silent.
-    double getLastTruePeakDb() const FREEDV_NONBLOCKING;
-
-    // No-op: libebur128 has no RT-safe way to clear its internal loudness
-    // history (only destroy+reinit, both of which allocate) -- reset() is
-    // declared FREEDV_NONBLOCKING (see IPipelineStep) so it must not
-    // allocate. Matches AgcStep's own original behavior, which never reset
-    // its ebur128 state either.
+    // No-op: libebur128 has no way to clear its history without
+    // destroying and reinitialising its state, both of which allocate.
     void reset() FREEDV_NONBLOCKING;
 
 private:

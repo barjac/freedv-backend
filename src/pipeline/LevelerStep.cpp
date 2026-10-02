@@ -2,7 +2,7 @@
 // Name:            LevelerStep.cpp
 // Purpose:         Describes a loudness leveler step in the audio pipeline.
 //
-// Authors:         Claude Code (for Barry Jones, G4MKT), design from
+// Authors:         Claude Code (for Barry Jackson, G4MKT), design from
 //                  g4dya (Richard)'s spec on PR #1472
 // License:
 //
@@ -38,149 +38,52 @@
 #include <cmath>
 
 #include "LevelerStep.h"
+#include "CompressorLimiterStep.h"
 
-// Leveler settings. Single symmetric time constant (spec: "same slow up
-// and down ramps"), unlike AgcStep's old asymmetric 0.5s/6.0s attack/
-// release -- proven in earlier live A/B testing that a proportional/
-// time-constant formula (see execute() below) tracks real speech far more
-// smoothly under EBU R128's silence-gating than a fixed dB/sec ramp.
-//
-// The target LUFS itself is no longer a fixed constant here (2026-09-24,
-// Barry -- see the constructor's own targetLufs_ comment in the header) --
-// it's the targetLufs_ member, seeded from the constructor's targetLufs
-// param (default -23.0f, this same original value) so it can be set via
-// the GUI's config file without a rebuild.
-constexpr float LEVELER_GAIN_LIMIT_DB = 12.0f; // symmetric +/-12dB per spec
-// 2.0s, per Barry's own prior live-tuning history on the old AgcStep (2026-09-15
-// clarification): 0.5s/6.0s asymmetric -> symmetric 3.0s/3.0s (confirmed
-// on-air, backend commit 4f59d0b) -> a later refinement down to symmetric
-// 2.0s/2.0s, which supersedes the 3.0s value. Not re-derived from scratch for
-// this redesign; carried forward as the known-good starting point.
+constexpr float LEVELER_GAIN_LIMIT_DB = 12.0f; // symmetric +/-12dB
+static_assert(CompressorLimiterStep::INPUT_HEADROOM_DB >= LEVELER_GAIN_LIMIT_DB,
+              "limiter input headroom must cover the leveler's maximum gain");
+
+// Smoothing time constant for current gain moving toward target gain.
+// Symmetric (same rise and fall), per the leveler spec.
 constexpr float LEVELER_TIME_CONSTANT_SEC = 2.0f;
-// Two thresholds (2026-09-21, Barry: "this is the leveller gain freeze
-// during pauses in speech. It could get chattery in high noise
-// environments when rnnoise is off") -- with RNNoise on, background noise
-// between words/transmissions is suppressed close to true silence, so the
-// original, more sensitive -33 LUFS still correctly freezes gain there.
-// Which one applies each block is decided in execute() via
-// noiseReductionEnabledFn_.
-//
-// _OFF corrected 2026-09-24: the original -25.0f assumed raw room/mic
-// noise during a genuine pause would sit somewhere below it, but real
-// captures the same day (with a persistent PSU fan acoustic noise present)
-// showed ordinary RNNoise-off speech itself routinely measuring below -25
-// -- e.g. one test at a normal, "just below the red" input level measured
-// a -32.31 LUFS median with every reading in the whole transmission below
-// -25, so essentially all real content was being frozen out, not just
-// pauses. Barry then measured the room's own fan-noise-only floor directly
-// from a dedicated silent capture at ~-34 LUFS, close to _ON's existing
-// -33 -- so _OFF is set to match _ON for now: real content's median sits
-// just above -33, giving a workable (if not perfect -- content in the
-// quietest ~25th percentile, e.g. trailing word endings, still falls
-// below it) margin above the measured noise floor, without guessing at an
-// arbitrarily loose value. Revisit if the fan noise is ever addressed at
-// the source, since a quieter room would allow a stricter, more selective
-// threshold here again.
+
+// PI controller. The measured loudness already includes the gain being
+// applied, so a proportional term on its own settles at only half the
+// required correction; the integral term removes that remaining error so
+// the output converges on the target. The integral time constant is longer
+// than LEVELER_TIME_CONSTANT_SEC because its job is only to remove that
+// persistent offset, not to react quickly.
+constexpr float LEVELER_KP = 1.0f;
+constexpr float LEVELER_INTEGRAL_TIME_CONSTANT_SEC = 4.0f;
+
+// Feedback at or below this is treated as a pause in speech and gain is
+// held. The RNNoise-on/off values are kept separate so they can be tuned
+// independently; measured room noise with RNNoise off (~-34 LUFS) put the
+// off value at the same level as the on value for now.
 constexpr float SILENCE_THRESHOLD_LUFS_RNNOISE_ON = -33.0f;
 constexpr float SILENCE_THRESHOLD_LUFS_RNNOISE_OFF = -33.0f;
 
-// Pause grace period (2026-09-30) -- see its own use in execute() for the
-// full reasoning. The actual duration is now pauseGracePeriodSec_ (a
-// constructor param, config-file settable -- see the header's own
-// comment), not a fixed constant; 0.3f there remains the default,
-// starting-point value, relative to ebur128_loudness_momentary()'s own
-// 400ms trailing window.
-// Distinguishes "no valid feedback has ever been seen this session" from
-// "genuinely very quiet" so the grace period never substitutes an unset
-// default in for a real reading -- matches this codebase's usual -200
-// sentinel convention (see LoudnessMeter.h) with a bit of margin either
-// side of it.
-constexpr float NO_VALID_FEEDBACK_YET_SENTINEL_LUFS = -199.0f;
+// Startup ramp-in. When the leveler is seeded with a saved gain, applying
+// it in full on the first syllable can push that syllable into clipping
+// before the limiter's envelope has anything to react to. The applied
+// gain is therefore ramped in over STARTUP_RAMP_SEC, counted from the
+// first real (non-silent) input rather than from construction, since
+// there's normally idle time between pressing Start and speaking. Has no
+// effect on an unseeded session, where gain starts at 0dB.
+constexpr float STARTUP_RAMP_SEC = 0.3f;
 
-// PI controller integral time constant (2026-09-18) -- see execute()'s
-// "PI controller" comment for the full derivation. Deliberately longer
-// than LEVELER_TIME_CONSTANT_SEC: the integral term's only job is slowly
-// eliminating any *persistent* bias the proportional term's own self-
-// reference leaves behind, not reacting quickly (that's the proportional
-// term's job, via the existing current-gain smoothing below).
-// 2026-09-19: lowered from an initial 15.0f (which live-tested fine for
-// "normal"/"high" input -- converged and settled correctly within a
-// ~20-30s test -- but a "low" test needing ~7-9dB of correction was still
-// visibly climbing, not yet converged, by ~22 seconds) to 6.0f, matching
-// Richard (G4DYA)'s original spec suggestion for the old AgcStep's release
-// time -- confirmed a clear live improvement (low converged noticeably
-// faster/closer, high stayed rock-steady at target throughout).
-//
-// Further lowered same day to 4.0f, per Barry: the old AgcStep tolerated
-// symmetric attack/release as fast as 2-3s without excessive wander (see
-// LEVELER_TIME_CONSTANT_SEC's own history comment below). Worth treating
-// that precedent cautiously rather than assuming it transfers directly,
-// though -- unlike a simple lag (which is inherently self-limiting/
-// restoring at any speed), this integral term has *no* restoring force of
-// its own (that's the proportional term's and the 2.0s current-gain
-// smoothing's job); making it faster mainly risks overshoot past the
-// target rather than the kind of wander a simple lag would show. Anti-
-// windup clamping is already in place either way. Re-tune further if this
-// over/undershoots in practice.
-constexpr float LEVELER_INTEGRAL_TIME_CONSTANT_SEC = 4.0f;
+// Peak level (-20dBFS) that counts as real audio for starting the ramp.
+// Deliberately well above typical background noise with RNNoise off, so the
+// ramp isn't used up on hiss before speech starts.
+constexpr double REAL_AUDIO_PEAK_THRESHOLD = 0.1;
 
 constexpr int TEN_MS_DIVIDER = 100;
 
-// Startup ramp-in (2026-09-20, Barry -- found via a real capture): applying
-// a seeded, persisted currentGainDb_ (see the constructor's own comment)
-// in full from sample one stacks with CompressorLimiterStep's own
-// gain-reduction envelope *also* starting cold (0dB reduction) at the
-// exact same moment -- a genuinely loud first syllable gets the full
-// persisted boost before the limiter's fast (but not instant) attack has
-// had any real audio to react to. Confirmed on a real capture: a first
-// syllable that peaked around -5dBFS raw (safely below clipping on its
-// own) touched true 0dBFS after a persisted +5.25dB was applied
-// instantly, while every later syllable at similar raw levels stayed
-// comfortably clear once the limiter had "warmed up". A fresh (non-seeded)
-// session doesn't need this: currentGainDb_ starts at 0dB and can't move
-// far in under a second thanks to LEVELER_TIME_CONSTANT_SEC, so this ramp
-// is a no-op there. 300ms is fast enough to be inaudible against any real
-// speech onset, but gives the limiter's per-sample envelope (2-5ms attack)
-// dozens of reaction cycles on real, gradually-increasing gain before the
-// full persisted value ever lands.
-//
-// Correction, same day (Barry, watching the newly-added applied-gain
-// trace): the ramp must NOT be keyed to wall-clock time since
-// construction -- a first version did exactly that, and Barry caught
-// (from the graph) that it was completing "immediately after TX starts,
-// long before the first syllable". In real use there's always some delay
-// between pressing Start (LevelerStep's construction) and actually
-// keying PTT and speaking, so a construction-time-based ramp had always
-// already finished by the time real audio arrived -- protecting nothing.
-// Fixed by keying the ramp to elapsed time since the first genuinely
-// non-silent input is actually seen (REAL_AUDIO_PEAK_THRESHOLD below),
-// which is the moment protection is actually needed.
-constexpr float STARTUP_RAMP_SEC = 0.3f;
-
-// -20dBFS (2026-09-20, raised from an initial -50dBFS -- Barry: "Without
-// rnnoise -50dBFS would be much too low"). Raw, unsuppressed mic self-
-// noise/room tone can comfortably exceed -50dBFS with RNNoise off, which
-// would falsely start (and so waste) the ramp on background hiss rather
-// than genuine speech -- reproducing the exact failure this ramp exists
-// to fix, just via a different route (the ramp finishing on noise instead
-// of on elapsed time, before the real loud syllable ever arrives).
-// Deliberately erred toward a *higher* (louder) threshold: triggering
-// late only delays the ramp's start until something genuinely loud
-// arrives, which is exactly when protection is actually needed anyway,
-// whereas triggering early on mere noise defeats the whole point. Real
-// speech peaks observed in captures so far run -5 to -25dBFS -- -20dBFS
-// stays clear of typical background noise while still comfortably
-// catching real speech onsets, but may need raising further on a
-// particularly noisy setup (e.g. RNNoise off with a noisy room or open
-// rig/SDR audio bleeding into the mic path). Only used to decide when the
-// startup ramp-in above should start counting; unrelated to
-// SILENCE_THRESHOLD_LUFS_RNNOISE_ON/OFF (a *measured loudness* gate on the
-// leveler's feedback, not a raw-peak gate on its input).
-constexpr double REAL_AUDIO_PEAK_THRESHOLD = 0.1; // -20dBFS
-
 LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
                          float initialGainDb, float initialIntegralErrorDb, float targetLufs,
-                         realtime_fp<bool()> const& noiseReductionEnabledFn, float pauseGracePeriodSec)
+                         realtime_fp<bool()> const& noiseReductionEnabledFn,
+                         realtime_fp<bool()> const& enabledFn)
     : sampleRate_(sampleRate)
     , feedbackLoudnessLufsFn_(feedbackLoudnessLufsFn)
     , targetGainDb_(initialGainDb)
@@ -188,11 +91,9 @@ LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLou
     , integralErrorDb_(initialIntegralErrorDb)
     , rampStarted_(false)
     , rampElapsedSec_(0.0f)
-    , lastValidFeedbackLufs_(NO_VALID_FEEDBACK_YET_SENTINEL_LUFS)
-    , invalidFeedbackElapsedSec_(0.0f)
-    , pauseGracePeriodSec_(pauseGracePeriodSec)
     , targetLufs_(targetLufs)
     , noiseReductionEnabledFn_(noiseReductionEnabledFn)
+    , enabledFn_(enabledFn)
     , diagLogger_(diagLogger)
 {
     // Pre-allocate buffers so we don't have to do so during real-time operation.
@@ -235,87 +136,16 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
     {
         int chunkSize = std::min(remaining, tenMsSamples);
 
-        // Step 1: pull the compressor/limiter's last-measured output
-        // loudness (feedback loop -- see the plan's Architecture section).
-        // A value at/below the silence threshold means either genuine
-        // silence or that no valid reading is available yet (e.g. right
-        // after construction) -- either way, freeze gain rather than
-        // chasing it, same as AgcStep's original silence-gating behavior.
-        // Threshold itself depends on RNNoise's live enabled state -- see
-        // SILENCE_THRESHOLD_LUFS_RNNOISE_ON/OFF's own comment above.
+        // Step 1: get the limiter's last measured output loudness. At or
+        // below the silence threshold means a pause in speech (or no
+        // reading yet).
         float feedbackLufs = feedbackLoudnessLufsFn_();
         float silenceThresholdLufs = noiseReductionEnabledFn_() ? SILENCE_THRESHOLD_LUFS_RNNOISE_ON : SILENCE_THRESHOLD_LUFS_RNNOISE_OFF;
         bool feedbackValid = feedbackLufs > silenceThresholdLufs;
         float blockDurationSec = (float)chunkSize / sampleRate_;
 
-        // Pause grace period (2026-09-30, Barry: watching the live AGC dB
-        // plot after a large quiet-to-normal input-level change, noticed
-        // gain correctly dropping on each utterance but freezing solid
-        // during the gaps between them -- "assuming that the speech could
-        // be expected to carry on at the new normal level then it would
-        // have been beneficial for the decay to continue between words in
-        // this situation"). The freeze itself exists for a real reason
-        // (without RNNoise, background noise between words can read loud
-        // enough to look like valid feedback, so unconditionally trusting
-        // every reading would mean the PI loop chases the noise floor
-        // during genuine gaps) -- but a *still-converging* correction has
-        // nothing to do with noise-chasing: the speaker's actual level
-        // hasn't changed just because they paused for breath, so freezing
-        // through every natural inter-word gap only adds dead time to
-        // convergence for no protective benefit.
-        //
-        // 300ms starting point (not yet empirically tuned): chosen
-        // relative to ebur128_loudness_momentary()'s own 400ms trailing
-        // window, which already gives the *measurement itself* some
-        // inherent bridging of brief gaps for free (a sub-400ms pause
-        // often won't even pull the windowed average below threshold, in
-        // the first place, since the window still contains mostly the
-        // preceding loud speech) -- so a grace period much shorter than
-        // that buys little, while stacking a much longer one *on top* of
-        // that inherent lag would erode the freeze's actual protection.
-        // 300ms sits just under that natural floor while remaining well
-        // short of a typical sentence-final pause.
-        //
-        // Corrected 2026-09-30, live-tested same day: an earlier version of
-        // this substituted the last valid feedbackLufs back in and let the
-        // *entire* PI update (including integral accumulation) keep
-        // running on it for up to the grace period. That re-derives
-        // targetGainDb_ fresh from a single frozen sample every block --
-        // and real words very often trail off in loudness right before a
-        // breath, so "the last valid reading before a gap" is frequently
-        // an artificially quiet tail, not representative of the word's
-        // real level. Confirmed live: a trailing-off word's last reading
-        // (-31.69 LUFS, well below target) got bridged, and re-running the
-        // integral on that single stale sample for the whole gap drove
-        // targetGainDb_ straight to the +12dB ceiling and dragged gain
-        // *up* during a stretch where the actual transmission trend was
-        // gain needing to come *down* -- the opposite of the intended
-        // "keep the real trend moving" effect.
-        //
-        // Fixed by not re-deriving targetGainDb_ during a gap at all --
-        // see below, gain smoothing continues toward whatever target was
-        // last legitimately computed from real data, without further
-        // integral accumulation from a possibly-unrepresentative sample.
-        bool withinGracePeriod = false;
-        if (feedbackValid)
-        {
-            lastValidFeedbackLufs_ = feedbackLufs;
-            invalidFeedbackElapsedSec_ = 0.0f;
-        }
-        else
-        {
-            invalidFeedbackElapsedSec_ += blockDurationSec;
-            withinGracePeriod = lastValidFeedbackLufs_ > NO_VALID_FEEDBACK_YET_SENTINEL_LUFS &&
-                                 invalidFeedbackElapsedSec_ <= pauseGracePeriodSec_;
-        }
-
-        // Raw input peak for this chunk -- needed both for the startup
-        // ramp-in's "has real audio actually started" check below and (as
-        // always) for the diagnostic input_dbfs value further down.
-        // Deliberately a separate pass over inPtr before any gain is
-        // applied, rather than folded into the sample-scaling loop below
-        // as it used to be -- this chunk's ramp state must be decided
-        // *before* computing this same chunk's applied gain.
+        // Input peak for this chunk, needed before gain is applied to
+        // decide whether the startup ramp has started.
         double peakAbs = 0.0;
         for (int i = 0; i < chunkSize; i++)
         {
@@ -323,10 +153,17 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
             if (absVal > peakAbs) peakAbs = absVal;
         }
 
-        // Startup ramp-in bookkeeping -- see STARTUP_RAMP_SEC's own
-        // comment above for why this exists and why it's keyed to real
-        // audio arriving, not wall-clock time since construction.
-        if (!rampStarted_ && peakAbs > REAL_AUDIO_PEAK_THRESHOLD)
+        // While disabled, gain is 0dB and nothing below updates. The ramp
+        // is re-armed so that re-enabling ramps the saved gain back in
+        // rather than stepping it.
+        bool enabled = enabledFn_();
+        if (!enabled)
+        {
+            rampStarted_ = false;
+            rampElapsedSec_ = 0.0f;
+        }
+
+        if (enabled && !rampStarted_ && peakAbs > REAL_AUDIO_PEAK_THRESHOLD)
         {
             rampStarted_ = true;
         }
@@ -335,106 +172,40 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
             rampElapsedSec_ += blockDurationSec;
         }
 
-        if (feedbackValid)
+        if (enabled && feedbackValid)
         {
-            // Step 2: calculate target gain -- PI controller (2026-09-18).
-            //
-            // feedbackLufs is measured on the *output* of the compressor/
-            // limiter, i.e. after currentGainDb_ has already been applied
-            // (the closed feedback loop described in the plan), so the raw
-            // instantaneous error below is self-referential in exactly the
-            // way the original (single-term, proportional-only) formula
-            // was: at equilibrium (current==target==G, output==input+G),
-            // G = targetLufs_ - (input + G) only has a solution at
-            // G = (targetLufs_ - input) / 2 -- half the needed
-            // correction, a permanent steady-state error (confirmed
-            // 2026-09-18: current_gain plateaued flat for 16+ seconds at
-            // exactly half the implied input deficit).
-            //
-            // An earlier fix (2026-09-18, same day) tried subtracting
-            // currentGainDb_ back out of the estimate to cancel that self-
-            // reference algebraically. It worked for a genuinely constant
-            // signal (LevelerStepTest's synthetic sine wave), but
-            // substituting it into the smoothing update below shows the
-            // currentGainDb_ terms cancel *completely*, turning the whole
-            // formula into a pure integrator of the loudness error with no
-            // restoring force at all. For real, time-varying speech that
-            // has no fixed equilibrium -- confirmed live (2026-09-18):
-            // current_gain climbing steadily through an entire transmission
-            // despite steady -23 LUFS input (not converging, just slowly
-            // drifting), and later, gain persisting near 0dB through a
-            // sustained loud passage despite target repeatedly diving to
-            // -6..-8dB (the net average of a real recording's momentary
-            // loudness swings doesn't have to average to zero just because
-            // the recording is "loud overall").
-            //
-            // Fix: a genuine PI controller. The proportional term below is
-            // the same self-referential raw error the original formula
-            // used (still only "correct" to within the same 50% bias in
-            // isolation) -- but paired with a separate, slowly-accumulating
-            // integral term that has no such bias and dominates at true
-            // equilibrium. Substituting into the smoothing update: at
-            // equilibrium (current==target==G, *and* the integral term has
-            // stopped changing, which only happens once the instantaneous
-            // error is itself zero), solving requires feedbackLufs to reach
-            // targetLufs_ exactly -- independent of the
-            // proportional term's own gain (Kp) or the integral time
-            // constant (Ki), which only affect *how fast* it gets there,
-            // not the final value. The proportional term still supplies a
-            // genuine restoring force for real, varying speech (reacting
-            // to each block's error directly, smoothed by the existing
-            // current-gain lag below) that the pure-integrator attempt
-            // above lacked entirely.
-            constexpr float KP = 1.0f;
+            // Step 2: PI controller target gain (see LEVELER_KP above).
             float instantErrorDb = targetLufs_ - feedbackLufs;
 
+            // Anti-windup: limit the integral term's contribution to the
+            // gain range, so a long loud or quiet stretch can't build up
+            // an excess that takes a long time to unwind.
             integralErrorDb_ += instantErrorDb * blockDurationSec;
-            // Anti-windup: without this, a long loud or quiet stretch that
-            // saturates targetGainDb_'s clamp below could keep accumulating
-            // integralErrorDb_ far beyond what's ever usable, so once real
-            // conditions reverse, gain would take a long time to "unwind"
-            // that excess before it starts responding correctly again --
-            // the classic PI integrator-windup problem. Clamping
-            // integralErrorDb_ itself to the range that keeps its own
-            // contribution within +/-LEVELER_GAIN_LIMIT_DB avoids that.
             float integralClampDb = LEVELER_GAIN_LIMIT_DB * LEVELER_INTEGRAL_TIME_CONSTANT_SEC;
             if (integralErrorDb_ > integralClampDb) integralErrorDb_ = integralClampDb;
             if (integralErrorDb_ < -integralClampDb) integralErrorDb_ = -integralClampDb;
 
-            targetGainDb_ = KP * instantErrorDb + integralErrorDb_ / LEVELER_INTEGRAL_TIME_CONSTANT_SEC;
+            targetGainDb_ = LEVELER_KP * instantErrorDb + integralErrorDb_ / LEVELER_INTEGRAL_TIME_CONSTANT_SEC;
             if (targetGainDb_ > LEVELER_GAIN_LIMIT_DB) targetGainDb_ = LEVELER_GAIN_LIMIT_DB;
             if (targetGainDb_ < -LEVELER_GAIN_LIMIT_DB) targetGainDb_ = -LEVELER_GAIN_LIMIT_DB;
         }
 
-        // Step 3: move current gain a fixed *fraction* of the way toward
-        // target each block, rather than a fixed dB/sec step -- this is
-        // what makes the formula self-compensate for EBU R128's irregular
-        // update opportunities during real speech. Runs whenever feedback
-        // is genuinely valid *or* we're still within the pause grace
-        // period -- in the grace-period case, targetGainDb_ was NOT
-        // recomputed above (see that block's own comment on why), so this
-        // is coasting toward the last value legitimately derived from real
-        // data, not chasing a fresh (and possibly unrepresentative) one.
-        // Genuinely frozen (gap outlasted the grace period) skips this
-        // entirely -- both target and current gain hold exactly still.
-        if (feedbackValid || withinGracePeriod)
+        // Step 3: move current gain a fraction of the way toward target
+        // each block (first-order smoothing), rather than a fixed dB/sec
+        // step. Held during pauses.
+        if (enabled && feedbackValid)
         {
             currentGainDb_ += ((targetGainDb_ - currentGainDb_) / LEVELER_TIME_CONSTANT_SEC) * blockDurationSec;
         }
 
-        // Scale samples based on current gain -- ramped in over
-        // STARTUP_RAMP_SEC of real elapsed time since real audio was first
-        // seen (a no-op once past it, and effectively a no-op for a fresh,
-        // non-seeded session too, since currentGainDb_ can't move far from
-        // 0 in under a second anyway). Deliberately doesn't touch
-        // currentGainDb_ itself -- the PI controller's own state keeps
-        // evolving normally underneath; only the actually-*applied* gain
-        // is held back at the very start. Before real audio has ever been
-        // seen (rampStarted_ still false), there's nothing to protect
-        // against yet, so apply gain in full -- harmless on silence.
+        // Step 4: apply gain, scaled down during the startup ramp-in. Only
+        // the applied gain is ramped; the controller state is unaffected.
+        // Output is handed to CompressorLimiterStep INPUT_HEADROOM_DB below
+        // its true level so that positive gain can't clip in the int16
+        // handover; the limiter restores it.
         float rampInFactor = rampStarted_ ? std::min(1.0f, rampElapsedSec_ / STARTUP_RAMP_SEC) : 1.0f;
-        float appliedGainDb = currentGainDb_ * rampInFactor;
-        float scaleFactor = expf(appliedGainDb / 20.0f * logf(10.0f));
+        float appliedGainDb = enabled ? currentGainDb_ * rampInFactor : 0.0f;
+        float scaleFactor = expf((appliedGainDb - CompressorLimiterStep::INPUT_HEADROOM_DB) / 20.0f * logf(10.0f));
         float temp = 0.0f;
         for (int i = 0; i < chunkSize; i++)
         {
@@ -443,11 +214,10 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
             ConvertSingleSampleToIntSampleType_<short, float>(&temp, &outPtr[i]);
         }
 
-        // DIAGNOSTIC ONLY (no-op unless built with ENABLE_AUDIO_DIAG_LOGGING).
+        // No-op unless built with ENABLE_AUDIO_DIAG_LOGGING.
         double inputDbfs = peakAbs > 0.0 ? 20.0 * std::log10(peakAbs) : -100.0;
         diagLogger_->logLevelerHalf(inputDbfs, feedbackValid ? (double)feedbackLufs : -100.0, targetGainDb_, currentGainDb_, (double)appliedGainDb);
 
-        // See getLiveAppliedGainDb()'s own comment.
         liveAppliedGainDb_.store(appliedGainDb, std::memory_order_relaxed);
 
         inPtr += chunkSize;
@@ -460,29 +230,8 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
 
 void LevelerStep::reset() FREEDV_NONBLOCKING
 {
-    // Reversed 2026-09-18 (Barry): reset() is called on *every* TX entry
-    // within a session (TxRxThread.cpp/MinimalTxRxThread.cpp's "just
-    // entered TX from RX" path is its only call site in either repo), not
-    // just once at Start -- so zeroing gain here meant every single PTT
-    // press re-ran the leveler's full climb from 0dB, rather than just
-    // once per session. That climb became far more noticeable after the
-    // 2026-09-18 feedback-formula fix (see the target-gain comment above):
-    // the corrected formula is a genuine integrator of the loudness error
-    // with no fixed equilibrium for real (non-constant) speech, so gain
-    // takes real, visible time to reach a sensible operating point from a
-    // cold 0dB start -- confirmed live via the diagnostic captures.
-    // Persisting gain across transmissions (i.e. not touching it here at
-    // all) means only the *first* transmission of a session pays that
-    // climb; later ones start already near the right operating point.
-    // This was Richard's original spec suggestion, explicitly rejected on
-    // 2026-09-15 before the above was known -- gain still starts at 0dB
-    // per-session via the constructor's own initialization, just no longer
-    // re-zeroed on every individual PTT press.
-    //
-    // integralErrorDb_ (added same day, PI controller redesign) is left
-    // untouched here for the same reason -- resetting it while
-    // currentGainDb_ persists would make targetGainDb_ jump discontinuously
-    // at the start of the next transmission (losing the integral
-    // contribution that was supporting wherever currentGainDb_ currently
-    // sits), the opposite of the smooth persistence intended above.
+    // Intentionally keeps gain and integral state. reset() is called at
+    // the start of every transmission, and resetting would make each one
+    // re-climb from 0dB; keeping the integral term consistent with the
+    // current gain also avoids a jump in target on the next transmission.
 }

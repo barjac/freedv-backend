@@ -139,10 +139,9 @@ message(STATUS "Enabling unit tests.")
 enable_testing()
 endif(BUILD_BACKEND_UNITTESTS)
 
-# Diagnostic-only CSV logging (LevelerStep/CompressorLimiterStep) for live
-# A/B tuning of the leveler/limiter -- writes ~/agc_diag.csv. Off by default
-# since it does blocking file I/O from the real-time audio thread; only
-# meant for a build used to feed ~/freedv-scripts/agc_diag_wide_plot.py.
+# Diagnostic-only CSV logging (LevelerStep/CompressorLimiterStep), written to
+# ~/agc_diag.csv for tuning and evaluation. Off by default since it does
+# blocking file I/O from the real-time audio thread.
 option(ENABLE_AUDIO_DIAG_LOGGING "Enable diagnostic CSV logging in the audio leveler/compressor-limiter pipeline steps. Not for production builds." OFF)
 if(ENABLE_AUDIO_DIAG_LOGGING)
 message(STATUS "Enabling audio diagnostic CSV logging.")

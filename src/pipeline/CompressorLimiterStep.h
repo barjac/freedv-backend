@@ -3,7 +3,7 @@
 // Purpose:         Describes a soft-knee compressor/limiter step in the
 //                  audio pipeline.
 //
-// Authors:         Claude Code (for Barry Jones, G4MKT), design from
+// Authors:         Claude Code (for Barry Jackson, G4MKT), design from
 //                  g4dya (Richard)'s spec on PR #1472
 // License:
 //
@@ -38,8 +38,7 @@
 #define AUDIO_PIPELINE__COMPRESSOR_LIMITER_STEP_H
 
 #include <atomic>
-#include <chrono>
-#include <cstdio>
+#include <cstdint>
 #include <memory>
 
 #include "IPipelineStep.h"
@@ -47,50 +46,35 @@
 #include "../util/DiagnosticCsvLogger.h"
 #include "../util/realtime_fp.h"
 
-// Soft-knee limiter, replacing WebRtcAgc_Process (which turned out to be a
-// hardcoded ~3:1 compressor with hidden makeup gain, not a limiter -- see
-// the "Replace AgcStep with a Leveler + Compressor/Limiter pair" plan).
-// Runs a genuine per-sample envelope follower with a short (~3-5ms)
-// look-ahead delay line, applying a single near-infinite-ratio soft-knee
-// gain stage right at the ceiling, so it only ever engages on genuinely
-// loud excursions near clipping, never on ordinary speech -- important
-// because RADE's neural encoder was almost certainly trained on
-// uncompressed speech (Barry, 2026-09-15).
+// Soft-knee peak limiter, replacing WebRtcAgc_Process (which, even with
+// compressionGaindB=0, applies a fixed internal ~3:1 compression ratio with
+// makeup gain rather than acting as a pure limiter).
 //
-// Originally a *two*-knee design (a gentler "compressor" knee pushed close
-// to the ceiling, feeding this same near-clip "limiter" knee). The
-// compressor knee was removed 2026-09-18 -- see CompressorLimiterStep.cpp's
-// comment at its old threshold constant -- once live testing showed its
-// one-directional gain reduction was feeding LevelerStep's closed feedback
-// loop a systematic upward bias on loud input (the leveler has no way to
-// distinguish "the compressor just reduced this" from "the input actually
-// got quieter"), and it was engaging often enough (~40% of rows on loud
-// speech) for that bias to be significant. A single rare, near-clip-only
-// limiter stage keeps the feedback loop meaningful (per Richard's spec --
-// the leveler should react to whatever this step actually does) while
-// keeping that bias negligible in practice.
+// Look-ahead peak limiter driving a single high-ratio soft knee just below
+// full scale, so it only engages on loud excursions near clipping and
+// leaves ordinary speech untouched. The audio is delayed by the look-ahead
+// window; the gain each sample needs is held at its minimum across the
+// window, then smoothed by a moving average of the same length. The gain
+// therefore ramps down smoothly ahead of each peak and is fully in place
+// when the peak reaches the output, so peaks never overshoot the knee
+// curve, however sudden their onset.
+// Leaving speech dynamics alone matters because the RADE encoder is
+// expected to have been trained on uncompressed speech. A lower
+// "compressor" knee was tried and removed: its frequent gain reduction fed
+// LevelerStep's feedback loop an upward bias on loud input.
 //
-// Owns a LoudnessMeter on its own *output*, feeding LevelerStep's feedback
-// loop via getLastOutputLoudnessLufs() (a static accessor, not an instance
-// method -- realtime_fp<float()> can only hold a plain captureless function
-// pointer, not one capturing a specific instance; see LevelAdjustStep's own
-// usage precedent in TxRxThread.cpp). Safe as a singleton-style value since
-// exactly one CompressorLimiterStep is ever active in the real TX pipeline
-// at a time, same assumption already made by g_agcEnabled and friends.
+// Also measures the loudness of its own output and publishes it via
+// getLastOutputLoudnessLufs() as LevelerStep's feedback signal. This is
+// static rather than per-instance because realtime_fp can only hold a
+// captureless function pointer (see LevelAdjustStep's usage); only one
+// CompressorLimiterStep is active in the TX pipeline at a time.
 class CompressorLimiterStep : public IPipelineStep
 {
 public:
-    // noiseReductionEnabledFn (2026-09-24, Barry -- found via a real
-    // capture plus an on/off/on/off live test confirming it always
-    // recovers, ruling out a stuck/corrupted state): picks between two
-    // silence floors for the internal LoudnessMeter's momentary reading
-    // (see LoudnessMeter.h's own comment and SILENCE_FLOOR_LUFS_RNNOISE_ON/
-    // OFF in the .cpp) -- with RNNoise off, genuine gaps between words can
-    // read quieter than RNNoise's own small residual noise floor during
-    // the same gaps, invalidating far more real (if quiet) speech than
-    // intended. Defaults to "always on" (the original, unconditional
-    // -70.0f floor) so existing callers (tests, freedv-backend's own
-    // MinimalTxRxThread.cpp) are unaffected.
+    // noiseReductionEnabledFn is polled each block to choose the silence
+    // floor for the output loudness measurement. With RNNoise off, gaps
+    // between words can measure quieter than RNNoise's own residual noise
+    // floor, so a lower floor is used to avoid rejecting quiet speech.
     CompressorLimiterStep(int sampleRate, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
                            realtime_fp<bool()> const& noiseReductionEnabledFn = +[]() FREEDV_NONBLOCKING { return true; });
     virtual ~CompressorLimiterStep();
@@ -100,7 +84,18 @@ public:
     virtual short* execute(short* inputSamples, int numInputSamples, int* numOutputSamples) FREEDV_NONBLOCKING override;
     virtual void reset() FREEDV_NONBLOCKING override;
 
+    // Most recent momentary loudness of this step's output, or -100.0 if
+    // the last reading was silent/invalid.
     static float getLastOutputLoudnessLufs() FREEDV_NONBLOCKING;
+
+    // Input level convention: the upstream LevelerStep hands its output
+    // over INPUT_HEADROOM_DB below its true level, and this step restores
+    // it (in floating point) before limiting. Pipeline steps exchange
+    // int16 samples, so without this, peaks the leveler pushes above full
+    // scale would be hard-clipped in the handover before the limiter ever
+    // saw them. Equal to LevelerStep's maximum gain, so the handover can
+    // never clip.
+    static constexpr float INPUT_HEADROOM_DB = 12.0f;
 
 private:
     int sampleRate_;
@@ -108,37 +103,38 @@ private:
     std::shared_ptr<DiagnosticCsvLogger> diagLogger_;
     realtime_fp<bool()> noiseReductionEnabledFn_;
 
-    // Look-ahead delay line: buf_[pos_] always holds the oldest (soon to be
-    // overwritten) sample, i.e. the one lookAheadLength_ samples in the
-    // past relative to the sample about to be written -- see execute()'s
-    // "read-then-write same slot" ring buffer pattern.
-    // (lookAheadLength_ declared before lookAheadBuffer_ deliberately --
-    // member init order follows declaration order, and the buffer's size
-    // depends on the length computed in the constructor init list.)
-    int lookAheadLength_;
-    std::unique_ptr<float[]> lookAheadBuffer_;
-    int lookAheadPos_;
+    // Returns the minimum of the last windowLength_ values passed in.
+    float slidingMinimum_(float value) FREEDV_NONBLOCKING;
 
-    // Per-sample envelope-follower state: smoothed *gain-reduction*
-    // command (dB, <= 0), not the level itself.
-    float smoothedGainReductionDb_;
-    float attackAlpha_;
+    // Look-ahead window length in samples. Must be declared before the
+    // buffers below, which are sized from it in the constructor's init list.
+    int windowLength_;
+
+    // Audio delay line, windowLength_ - 1 samples.
+    std::unique_ptr<float[]> delayBuffer_;
+    int delayPos_;
+
+    // Sliding-minimum ring buffer (monotonic queue) of required gains.
+    std::unique_ptr<float[]> holdValues_;
+    std::unique_ptr<int64_t[]> holdIndices_;
+    int holdHead_;
+    int holdCount_;
+    int64_t sampleIndex_;
+
+    // Held gain after release smoothing (linear, <= 1).
+    float releasedGain_;
     float releaseAlpha_;
+
+    // Moving average of releasedGain_ over windowLength_ samples.
+    std::unique_ptr<float[]> averageBuffer_;
+    double averageSum_;
+    int averagePos_;
+
+    float inputHeadroomScale_;
 
     std::unique_ptr<short[]> outputSamples_;
 
     static std::atomic<float> lastOutputLoudnessLufs_;
-
-    // TEMPORARY (2026-09-24) -- see execute()'s own comment. A separate,
-    // self-contained diagnostic file (own fopen/fprintf, same pattern as
-    // PostLoopCompressorStep's own diagnostic -- deliberately not routed
-    // through the shared DiagnosticCsvLogger, no schema change needed) to
-    // properly calibrate SILENCE_FLOOR_LUFS_RNNOISE_OFF against the actual
-    // raw momentary LUFS values LoudnessMeter is computing, instead of
-    // continuing to guess at another constant blind. Remove once that's
-    // done.
-    FILE* rawLoudnessDiagFile_;
-    std::chrono::steady_clock::time_point rawLoudnessDiagStartTime_;
 };
 
 #endif // AUDIO_PIPELINE__COMPRESSOR_LIMITER_STEP_H

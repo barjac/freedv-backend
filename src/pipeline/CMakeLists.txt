@@ -10,7 +10,6 @@ add_library(fdv_audio_pipeline STATIC
     MinimalRealTimeHelper.cpp
     MinimalTxRxThread.cpp
     MuteStep.cpp
-    PostLoopCompressorStep.cpp
     RADEReceiveStep.cpp
     RADETransmitStep.cpp
     ResampleStep.cpp
@@ -44,7 +43,6 @@ endmacro()
 
 DefineUnitTest(LevelerStepTest)
 DefineUnitTest(CompressorLimiterStepTest)
-DefineUnitTest(PostLoopCompressorStepTest)
 DefineUnitTest(AudioPipelineTest)
 DefineUnitTest(EitherOrTest)
 DefineUnitTest(LevelAdjustTest)

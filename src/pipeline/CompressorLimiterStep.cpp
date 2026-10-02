@@ -3,7 +3,7 @@
 // Purpose:         Describes a soft-knee compressor/limiter step in the
 //                  audio pipeline.
 //
-// Authors:         Claude Code (for Barry Jones, G4MKT), design from
+// Authors:         Claude Code (for Barry Jackson, G4MKT), design from
 //                  g4dya (Richard)'s spec on PR #1472
 // License:
 //
@@ -37,90 +37,49 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
-#include <cstdlib>
-#include <string>
 
 #include "CompressorLimiterStep.h"
 
-// Knee 1 ("compressor") removed, 2026-09-18: LevelerStep's feedback is
-// measured on this step's *output*, i.e. after gain reduction has already
-// been applied -- a deliberate closed-loop design (Richard's spec) so the
-// leveler reacts to whatever this stage actually does. But knee 1's gain
-// reduction is a one-directional bias the leveler has no way to see
-// through: LevelerStep backs out its own applied gain to estimate the
-// input level, but has no way to also back out this stage's reduction, so
-// every dB of reduction here reads to the leveler as "the input just got
-// quieter" -- pushing it to ask for *more* gain in response, which this
-// stage then has to fight right back down. Confirmed live (2026-09-18):
-// knee 1 was engaging on ~40% of rows for loud input (each engagement
-// >=0dB by construction, so the bias is always upward, never cancels out
-// on average), and that engagement percentage tracked almost exactly with
-// how far a test's measured output loudness overshot the -23 LUFS target.
-// Barry's call: removing knee 1 keeps the feedback loop meaningful (it
-// still reacts to knee 2's real, if rare, action) while making that bias
-// negligible in practice, rather than hiding any stage's action from the
-// loop (which would defeat the loop's purpose) or replacing the whole
-// stage with something unproven (e.g. Mooneer's cubic soft-clipper --
-// PR #49 -- has its own known issues, not adopted here, not yet tested).
-//
-// Knee 2 ("limiter"): reuses AgcStep's old ~-1 to -2dBFS ceiling precedent,
-// near-infinite ratio, tighter knee for a sharper (but still soft, per
-// spec) transition into brickwall-like behavior right at the ceiling.
-constexpr float KNEE2_THRESHOLD_DB = -1.5f;
-constexpr float KNEE2_RATIO = 20.0f;
-constexpr float KNEE2_WIDTH_DB = 2.0f;
+// Limiter knee: ceiling just below full scale (similar to the -1 to -2dBFS
+// limiter level used previously), high ratio, narrow but still soft knee.
+constexpr float LIMITER_THRESHOLD_DB = -1.5f;
+constexpr float LIMITER_RATIO = 20.0f;
+constexpr float LIMITER_KNEE_WIDTH_DB = 2.0f;
 
-// Important constraint (Barry, 2026-09-15): a fast limiter risks generating
-// its own harmonic distortion if the gain-reduction command moves within
-// less than one cycle of the audio it's acting on (amplitude-modulates the
-// waveform, like clipping). Richard's spec's literal "attack <=1ms" is fast
-// enough to distort the low end of the voice band (~300Hz has a ~3.3ms
-// period). Floored at ~one low-frequency cycle instead -- starting
-// recommendation, tune via live A/B testing.
-constexpr float ATTACK_TIME_SEC = 0.003f;
-constexpr float RELEASE_TIME_SEC = 0.25f; // per spec, ~250ms
-
-// Short look-ahead (Barry, 2026-09-15, adopted for v1 to address the
-// harmonics concern above): lets the gain begin dropping before the
-// corresponding (delayed) peak reaches the output, rather than only
-// reacting after it. Cheap CPU-wise (a small ring buffer, no filtering/
-// resampling) but adds this much fixed latency to the live TX audio path
-// (and, via the feedback loop, to LevelerStep's loudness reading -- both
-// negligible next to EBU R128's own ~400ms latency and the leveler's
-// multi-second time constant). Roughly matches ATTACK_TIME_SEC above.
+// Look-ahead window. Gain reduction ramps in over this time ahead of each
+// peak, so the gain is fully down when the peak reaches the output. 4ms
+// is just over one period of the lowest voice frequencies (~300Hz =
+// 3.3ms): a gain change within a single cycle would amplitude-modulate the
+// waveform and generate harmonics, much like clipping. Adds this much
+// fixed latency to TX audio, negligible next to RADE's own latency.
 constexpr float LOOKAHEAD_TIME_SEC = 0.004f;
+constexpr float RELEASE_TIME_SEC = 0.25f;
 
 constexpr float LEVEL_FLOOR_DB = -120.0f; // for log10(0) avoidance
 constexpr int TEN_MS_DIVIDER = 100;
 
-// Two silence floors for LoudnessMeter's momentary reading (2026-09-24,
-// Barry -- see CompressorLimiterStep.h's own constructor comment). -70.0f
-// is LoudnessMeter's original, unconditional default. -85.0f is a starting
-// point for RNNoise-off, chosen to comfortably admit genuinely-present
-// (if quiet) raw speech in real gaps between words without also admitting
-// true digital silence (still rejected separately via the -HUGE_VAL check
-// in LoudnessMeter::getMomentaryLoudness() regardless of this floor) --
-// not yet empirically tuned against a real capture, just picked to be
-// clearly looser than -70 without being unbounded.
+// Silence floors for the output loudness measurement (see the
+// constructor's comment in the header). Digital silence is always
+// rejected regardless of floor.
 constexpr double SILENCE_FLOOR_LUFS_RNNOISE_ON = -70.0;
 constexpr double SILENCE_FLOOR_LUFS_RNNOISE_OFF = -85.0;
 
 namespace {
 
-// Standard two-parameter soft-knee compressor curve (Giannoulis/Massberg/
-// Reiss). Returns the *output* level (dB) for a given *input* level (dB);
-// caller subtracts input from the result to get the gain-reduction amount.
+// Standard soft-knee compressor curve (Giannoulis, Massberg & Reiss,
+// "Digital Dynamic Range Compressor Design", JAES 2012). Returns the
+// output level (dB) for a given input level (dB).
 float softKneeGainDb(float levelDb, float thresholdDb, float ratio, float kneeWidthDb)
 {
     float overshoot = levelDb - thresholdDb;
     if (2.0f * overshoot < -kneeWidthDb)
     {
-        // Below the knee entirely -- no change.
+        // Below the knee -- no change.
         return levelDb;
     }
     else if (2.0f * std::fabs(overshoot) <= kneeWidthDb)
     {
-        // Inside the knee -- smooth quadratic transition.
+        // Inside the knee -- quadratic transition.
         float kneeTerm = overshoot + kneeWidthDb / 2.0f;
         return levelDb + (1.0f / ratio - 1.0f) * (kneeTerm * kneeTerm) / (2.0f * kneeWidthDb);
     }
@@ -141,49 +100,29 @@ CompressorLimiterStep::CompressorLimiterStep(int sampleRate, std::shared_ptr<Dia
     , loudnessMeter_(sampleRate)
     , diagLogger_(diagLogger)
     , noiseReductionEnabledFn_(noiseReductionEnabledFn)
-    , lookAheadLength_(std::max(1, (int)std::lround(sampleRate * LOOKAHEAD_TIME_SEC)))
-    , lookAheadBuffer_(std::make_unique<float[]>(lookAheadLength_)) // value-initialized (zeroed)
-    , lookAheadPos_(0)
-    , smoothedGainReductionDb_(0.0f)
-    , rawLoudnessDiagFile_(nullptr)
+    , windowLength_(std::max(2, (int)std::lround(sampleRate * LOOKAHEAD_TIME_SEC)))
+    , delayBuffer_(std::make_unique<float[]>(windowLength_ - 1))
+    , holdValues_(std::make_unique<float[]>(windowLength_))
+    , holdIndices_(std::make_unique<int64_t[]>(windowLength_))
+    , averageBuffer_(std::make_unique<float[]>(windowLength_))
 {
-    assert(lookAheadBuffer_ != nullptr);
+    assert(delayBuffer_ != nullptr && holdValues_ != nullptr && holdIndices_ != nullptr && averageBuffer_ != nullptr);
 
     // Pre-allocate buffers so we don't have to do so during real-time operation.
     outputSamples_ = std::make_unique<short[]>(sampleRate_);
     assert(outputSamples_ != nullptr);
 
-    // Precompute one-pole smoothing coefficients (fixed since sampleRate_
-    // is fixed at construction): alpha = 1 - exp(-dt/tau), dt = 1 sample.
-    float dt = 1.0f / sampleRate_;
-    attackAlpha_ = 1.0f - expf(-dt / ATTACK_TIME_SEC);
-    releaseAlpha_ = 1.0f - expf(-dt / RELEASE_TIME_SEC);
+    inputHeadroomScale_ = powf(10.0f, INPUT_HEADROOM_DB / 20.0f);
 
-    // TEMPORARY (2026-09-24) -- see the header's own comment on
-    // rawLoudnessDiagFile_.
-#if defined(FREEDV_ENABLE_AUDIO_DIAG_LOGGING)
-    const char* home = std::getenv("HOME");
-    if (home != nullptr)
-    {
-        std::string path = std::string(home) + "/freedv-data/loudness_meter_diag.csv";
-        rawLoudnessDiagFile_ = fopen(path.c_str(), "w");
-        if (rawLoudnessDiagFile_ != nullptr)
-        {
-            fprintf(rawLoudnessDiagFile_, "elapsed_ms,raw_momentary_lufs,floor_used,accepted,sample_peak_dbfs,true_peak_dbtp,true_peak_margin_db\n");
-            fflush(rawLoudnessDiagFile_);
-        }
-    }
-#endif // defined(FREEDV_ENABLE_AUDIO_DIAG_LOGGING)
-    rawLoudnessDiagStartTime_ = std::chrono::steady_clock::now();
+    // One-pole release coefficient: alpha = 1 - exp(-dt/tau), dt = 1 sample.
+    releaseAlpha_ = 1.0f - expf(-1.0f / (sampleRate_ * RELEASE_TIME_SEC));
+
+    reset();
 }
 
 CompressorLimiterStep::~CompressorLimiterStep()
 {
-    if (rawLoudnessDiagFile_ != nullptr)
-    {
-        fclose(rawLoudnessDiagFile_);
-        rawLoudnessDiagFile_ = nullptr;
-    }
+    // empty
 }
 
 int CompressorLimiterStep::getInputSampleRate() const FREEDV_NONBLOCKING
@@ -201,9 +140,35 @@ float CompressorLimiterStep::getLastOutputLoudnessLufs() FREEDV_NONBLOCKING
     return lastOutputLoudnessLufs_.load(std::memory_order_relaxed);
 }
 
+float CompressorLimiterStep::slidingMinimum_(float value) FREEDV_NONBLOCKING
+{
+    // Monotonic queue: values increase from front to back, so the front is
+    // the minimum of the current window. Each entry is pushed and popped at
+    // most once, so this is O(1) amortized per sample.
+    if (holdCount_ > 0 && holdIndices_[holdHead_] <= sampleIndex_ - windowLength_)
+    {
+        holdHead_ = (holdHead_ + 1) % windowLength_;
+        holdCount_--;
+    }
+    while (holdCount_ > 0)
+    {
+        int back = (holdHead_ + holdCount_ - 1) % windowLength_;
+        if (holdValues_[back] < value) break;
+        holdCount_--;
+    }
+    int tail = (holdHead_ + holdCount_) % windowLength_;
+    holdValues_[tail] = value;
+    holdIndices_[tail] = sampleIndex_;
+    holdCount_++;
+    sampleIndex_++;
+
+    return holdValues_[holdHead_];
+}
+
 short* CompressorLimiterStep::execute(short* inputSamples, int numInputSamples, int* numOutputSamples) FREEDV_NONBLOCKING
 {
     int tenMsSamples = std::max(1, sampleRate_ / TEN_MS_DIVIDER);
+    const float kneeStartDb = LIMITER_THRESHOLD_DB - LIMITER_KNEE_WIDTH_DB / 2.0f;
 
     short* inPtr = inputSamples;
     short* outPtr = outputSamples_.get();
@@ -214,107 +179,85 @@ short* CompressorLimiterStep::execute(short* inputSamples, int numInputSamples, 
     {
         int chunkSize = std::min(remaining, tenMsSamples);
         double peakOutAbs = 0.0;
+        float minGainThisChunk = 1.0f;
 
         for (int i = 0; i < chunkSize; i++)
         {
             float currentSample = 0.0f;
             ConvertSingleSampleToFloatSampleType_<float, short>(&inPtr[i], &currentSample);
+            currentSample *= inputHeadroomScale_; // restore true level (see INPUT_HEADROOM_DB)
 
-            // Step 1: per-sample envelope detection on the *pre-delay*
-            // signal -- combined with the look-ahead delay line below,
-            // this lets the gain start dropping before the corresponding
-            // (delayed) peak reaches the output, without needing a more
-            // expensive windowed peak scan.
+            // Step 1: gain this sample needs, from the static soft-knee curve.
+            float requiredGain = 1.0f;
             float absVal = std::fabs(currentSample);
             float levelDb = absVal > 0.0f ? 20.0f * log10f(absVal) : LEVEL_FLOOR_DB;
+            if (levelDb > kneeStartDb)
+            {
+                float kneeOutDb = softKneeGainDb(levelDb, LIMITER_THRESHOLD_DB, LIMITER_RATIO, LIMITER_KNEE_WIDTH_DB);
+                requiredGain = powf(10.0f, (kneeOutDb - levelDb) / 20.0f);
+            }
 
-            // Step 2: static soft-knee gain curve (knee 2/"limiter" only --
-            // see the removed knee 1's comment above).
-            float knee2OutDb = softKneeGainDb(levelDb, KNEE2_THRESHOLD_DB, KNEE2_RATIO, KNEE2_WIDTH_DB);
-            float staticGainReductionDb = knee2OutDb - levelDb; // <= 0
+            // Step 2: lowest required gain over the look-ahead window, so a
+            // peak is accounted for for the whole time it spends in the
+            // delay line.
+            float heldGain = slidingMinimum_(requiredGain);
 
-            // Step 3: smooth the *gain-reduction command* (not the level),
-            // fast attack when reduction is increasing, slow release when
-            // recovering toward unity -- only ever attenuates (spec:
-            // "maximum gain for this stage is unity").
-            float alpha = (staticGainReductionDb < smoothedGainReductionDb_) ? attackAlpha_ : releaseAlpha_;
-            smoothedGainReductionDb_ += (staticGainReductionDb - smoothedGainReductionDb_) * alpha;
+            // Step 3: release. Follow reductions immediately (the ramp comes
+            // from step 4), recover slowly toward unity.
+            if (heldGain < releasedGain_)
+            {
+                releasedGain_ = heldGain;
+            }
+            else
+            {
+                releasedGain_ += (heldGain - releasedGain_) * releaseAlpha_;
+            }
 
-            // Step 4: look-ahead delay line (read-then-write same slot --
-            // lookAheadBuffer_[lookAheadPos_] holds the sample from
-            // lookAheadLength_ samples ago; overwrite it with the new
-            // sample once read, then advance).
-            float delayedSample = lookAheadBuffer_[lookAheadPos_];
-            lookAheadBuffer_[lookAheadPos_] = currentSample;
-            lookAheadPos_++;
-            if (lookAheadPos_ >= lookAheadLength_) lookAheadPos_ = 0;
+            // Step 4: moving average over the same window length, giving a
+            // smooth ramp into each reduction. With the delay below being
+            // one sample shorter than the window, every value averaged for
+            // an output sample includes that sample in its hold window, so
+            // the applied gain is never more than the sample requires.
+            averageSum_ += releasedGain_ - averageBuffer_[averagePos_];
+            averageBuffer_[averagePos_] = releasedGain_;
+            averagePos_ = (averagePos_ + 1) % windowLength_;
+            float gain = std::min(1.0f, (float)(averageSum_ / windowLength_));
+            if (gain < minGainThisChunk) minGainThisChunk = gain;
 
-            // Step 5: apply smoothed gain to the delayed sample, convert
-            // back to int16 -- the existing int16 saturate becomes a true
-            // last-resort backstop, not the primary (broken) limiting
-            // mechanism it was in AgcStep/WebRtcAgc_Process.
-            float scaleFactor = expf(smoothedGainReductionDb_ / 20.0f * logf(10.0f));
-            float outSampleFloat = delayedSample * scaleFactor;
+            // Step 5: delay line (windowLength_ - 1 samples) -- read the
+            // oldest sample, then overwrite that slot with the newest.
+            float delayedSample = delayBuffer_[delayPos_];
+            delayBuffer_[delayPos_] = currentSample;
+            delayPos_ = (delayPos_ + 1) % (windowLength_ - 1);
+
+            // Step 6: apply gain. The int16 saturation in the conversion
+            // remains only as a last-resort backstop.
+            float outSampleFloat = delayedSample * gain;
             ConvertSingleSampleToIntSampleType_<short, float>(&outSampleFloat, &outPtr[i]);
 
             double outAbs = std::fabs((double)outPtr[i]) / 32768.0;
             if (outAbs > peakOutAbs) peakOutAbs = outAbs;
         }
 
-        // Feed this chunk's actual output into the loudness meter --
-        // LevelerStep's feedback loop (see getLastOutputLoudnessLufs())
-        // reads whatever this stores below. Silence floor depends on
-        // RNNoise's live enabled state -- see
-        // SILENCE_FLOOR_LUFS_RNNOISE_ON/OFF's own comment above.
+        // Measure this chunk's output loudness for LevelerStep's feedback.
+        // Publish -100 on silence/no reading rather than leaving a stale
+        // value in place, so LevelerStep holds its gain.
         loudnessMeter_.addFrames(outPtr, chunkSize);
         double lufs = 0.0;
         double silenceFloorLufs = noiseReductionEnabledFn_() ? SILENCE_FLOOR_LUFS_RNNOISE_ON : SILENCE_FLOOR_LUFS_RNNOISE_OFF;
-        bool accepted = loudnessMeter_.getMomentaryLoudness(&lufs, silenceFloorLufs);
-        if (accepted)
+        if (loudnessMeter_.getMomentaryLoudness(&lufs, silenceFloorLufs))
         {
             lastOutputLoudnessLufs_.store((float)lufs, std::memory_order_relaxed);
         }
         else
         {
-            // Silence/gated -- explicitly signal "invalid" rather than
-            // leaving a stale loud reading in place, so LevelerStep
-            // correctly freezes its own gain (see LevelerStep::execute()'s
-            // SILENCE_THRESHOLD_LUFS check).
             lastOutputLoudnessLufs_.store(-100.0f, std::memory_order_relaxed);
         }
 
+        // No-op unless built with ENABLE_AUDIO_DIAG_LOGGING. Logs the
+        // deepest gain reduction within the chunk.
         double outputDbfs = peakOutAbs > 0.0 ? 20.0 * std::log10(peakOutAbs) : -100.0;
-
-        // TEMPORARY (2026-09-24, extended 2026-09-30) -- see the header's
-        // own comment on rawLoudnessDiagFile_. lufs is now always populated
-        // by getMomentaryLoudness() (see its own comment), even when
-        // accepted is false, specifically so this can log the real value
-        // instead of an opaque placeholder.
-        //
-        // true_peak_dbtp/true_peak_margin_db added 2026-09-30 (Barry,
-        // relaying a suggestion from a separate chat about True Peak
-        // measurement) -- quantifies how much headroom the -1.5dBFS
-        // limiter ceiling actually leaves against real inter-sample
-        // overshoot, rather than trusting the original margin-based
-        // design choice blind. sample_peak_dbfs is outputDbfs (already
-        // computed above); true_peak_margin_db = true_peak - sample_peak,
-        // i.e. how much true peak exceeds simple sample-peak for this
-        // same block -- the actual inter-sample overshoot amount.
-        if (rawLoudnessDiagFile_ != nullptr)
-        {
-            double truePeakDbtp = loudnessMeter_.getLastTruePeakDb();
-            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - rawLoudnessDiagStartTime_).count();
-            FREEDV_BEGIN_VERIFIED_SAFE
-            fprintf(rawLoudnessDiagFile_, "%lld,%.2f,%.2f,%d,%.2f,%.2f,%.2f\n",
-                (long long)elapsedMs, lufs, silenceFloorLufs, accepted ? 1 : 0,
-                outputDbfs, truePeakDbtp, truePeakDbtp - outputDbfs);
-            fflush(rawLoudnessDiagFile_);
-            FREEDV_END_VERIFIED_SAFE
-        }
-
-        // DIAGNOSTIC ONLY (no-op unless built with ENABLE_AUDIO_DIAG_LOGGING).
-        diagLogger_->logCompressorLimiterHalfAndFlush(smoothedGainReductionDb_, outputDbfs);
+        diagLogger_->logCompressorLimiterHalfAndFlush(20.0 * std::log10((double)minGainThisChunk), outputDbfs);
 
         inPtr += chunkSize;
         outPtr += chunkSize;
@@ -326,15 +269,25 @@ short* CompressorLimiterStep::execute(short* inputSamples, int numInputSamples, 
 
 void CompressorLimiterStep::reset() FREEDV_NONBLOCKING
 {
-    smoothedGainReductionDb_ = 0.0f;
-    lookAheadPos_ = 0;
-    for (int i = 0; i < lookAheadLength_; i++)
+    for (int i = 0; i < windowLength_ - 1; i++)
     {
-        lookAheadBuffer_[i] = 0.0f;
+        delayBuffer_[i] = 0.0f;
     }
+    delayPos_ = 0;
 
-    // No-op -- see LoudnessMeter::reset()'s header comment (ebur128 state
-    // can't be cleared without reallocating, which reset() -- declared
-    // FREEDV_NONBLOCKING -- must not do).
+    holdHead_ = 0;
+    holdCount_ = 0;
+    sampleIndex_ = 0;
+
+    releasedGain_ = 1.0f;
+
+    for (int i = 0; i < windowLength_; i++)
+    {
+        averageBuffer_[i] = 1.0f;
+    }
+    averageSum_ = windowLength_;
+    averagePos_ = 0;
+
+    // No-op -- see LoudnessMeter::reset().
     loudnessMeter_.reset();
 }
