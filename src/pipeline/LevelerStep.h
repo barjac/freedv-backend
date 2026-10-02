@@ -68,13 +68,9 @@ public:
     // targetLufs: loudness target for the output of the limiter.
     // noiseReductionEnabledFn: polled each block to choose the threshold
     //   below which feedback is treated as a pause in speech.
-    // pauseGracePeriodSec: how long gain keeps moving toward its current
-    //   target after feedback drops out, so short gaps between words don't
-    //   stall convergence (see execute()).
     LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
                 float initialGainDb = 0.0f, float initialIntegralErrorDb = 0.0f, float targetLufs = -23.0f,
-                realtime_fp<bool()> const& noiseReductionEnabledFn = +[]() FREEDV_NONBLOCKING { return true; },
-                float pauseGracePeriodSec = 0.3f);
+                realtime_fp<bool()> const& noiseReductionEnabledFn = +[]() FREEDV_NONBLOCKING { return true; });
     virtual ~LevelerStep();
 
     virtual int getInputSampleRate() const FREEDV_NONBLOCKING override;
@@ -104,10 +100,6 @@ private:
     // input is seen; rampElapsedSec_ only advances after that.
     bool rampStarted_;
     float rampElapsedSec_;
-    // Pause grace period state.
-    float lastValidFeedbackLufs_;
-    float invalidFeedbackElapsedSec_;
-    float pauseGracePeriodSec_;
     float targetLufs_;
     realtime_fp<bool()> noiseReductionEnabledFn_;
     std::unique_ptr<short[]> outputSamples_;

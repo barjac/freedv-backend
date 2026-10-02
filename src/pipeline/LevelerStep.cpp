@@ -64,10 +64,6 @@ constexpr float LEVELER_INTEGRAL_TIME_CONSTANT_SEC = 4.0f;
 constexpr float SILENCE_THRESHOLD_LUFS_RNNOISE_ON = -33.0f;
 constexpr float SILENCE_THRESHOLD_LUFS_RNNOISE_OFF = -33.0f;
 
-// Marks "no valid feedback seen yet this session" so the pause grace
-// period never acts on an unset value.
-constexpr float NO_VALID_FEEDBACK_YET_SENTINEL_LUFS = -199.0f;
-
 // Startup ramp-in. When the leveler is seeded with a saved gain, applying
 // it in full on the first syllable can push that syllable into clipping
 // before the limiter's envelope has anything to react to. The applied
@@ -86,7 +82,7 @@ constexpr int TEN_MS_DIVIDER = 100;
 
 LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLoudnessLufsFn, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
                          float initialGainDb, float initialIntegralErrorDb, float targetLufs,
-                         realtime_fp<bool()> const& noiseReductionEnabledFn, float pauseGracePeriodSec)
+                         realtime_fp<bool()> const& noiseReductionEnabledFn)
     : sampleRate_(sampleRate)
     , feedbackLoudnessLufsFn_(feedbackLoudnessLufsFn)
     , targetGainDb_(initialGainDb)
@@ -94,9 +90,6 @@ LevelerStep::LevelerStep(int sampleRate, realtime_fp<float()> const& feedbackLou
     , integralErrorDb_(initialIntegralErrorDb)
     , rampStarted_(false)
     , rampElapsedSec_(0.0f)
-    , lastValidFeedbackLufs_(NO_VALID_FEEDBACK_YET_SENTINEL_LUFS)
-    , invalidFeedbackElapsedSec_(0.0f)
-    , pauseGracePeriodSec_(pauseGracePeriodSec)
     , targetLufs_(targetLufs)
     , noiseReductionEnabledFn_(noiseReductionEnabledFn)
     , diagLogger_(diagLogger)
@@ -149,27 +142,6 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
         bool feedbackValid = feedbackLufs > silenceThresholdLufs;
         float blockDurationSec = (float)chunkSize / sampleRate_;
 
-        // Pause grace period: for a short time after feedback drops out,
-        // keep current gain moving toward the last target computed from
-        // real data, so a correction still in progress isn't stalled by
-        // every gap between words. The target itself is not recomputed
-        // during the gap: the last reading before a pause is often a
-        // word's quiet tail, and integrating on it would push gain the
-        // wrong way. The default (300ms) sits just under the 400ms
-        // momentary window, which already bridges shorter gaps by itself.
-        bool withinGracePeriod = false;
-        if (feedbackValid)
-        {
-            lastValidFeedbackLufs_ = feedbackLufs;
-            invalidFeedbackElapsedSec_ = 0.0f;
-        }
-        else
-        {
-            invalidFeedbackElapsedSec_ += blockDurationSec;
-            withinGracePeriod = lastValidFeedbackLufs_ > NO_VALID_FEEDBACK_YET_SENTINEL_LUFS &&
-                                 invalidFeedbackElapsedSec_ <= pauseGracePeriodSec_;
-        }
-
         // Input peak for this chunk, needed before gain is applied to
         // decide whether the startup ramp has started.
         double peakAbs = 0.0;
@@ -208,8 +180,8 @@ short* LevelerStep::execute(short* inputSamples, int numInputSamples, int* numOu
 
         // Step 3: move current gain a fraction of the way toward target
         // each block (first-order smoothing), rather than a fixed dB/sec
-        // step. Held entirely once a pause outlasts the grace period.
-        if (feedbackValid || withinGracePeriod)
+        // step. Held during pauses.
+        if (feedbackValid)
         {
             currentGainDb_ += ((targetGainDb_ - currentGainDb_) / LEVELER_TIME_CONSTANT_SEC) * blockDurationSec;
         }

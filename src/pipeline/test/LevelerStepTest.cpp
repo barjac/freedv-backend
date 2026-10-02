@@ -147,119 +147,35 @@ bool levelerConvergesTowardConfigurableTarget()
     return true;
 }
 
-// Once feedback stays below the silence threshold for longer than the pause
-// grace period, gain should hold exactly where it is. (Shorter gaps are
-// covered by levelerBridgesShortGapsViaGracePeriod.)
+// As soon as feedback drops below the silence threshold, gain should hold
+// exactly where it is: no further movement from the first 10ms block of a
+// pause onward, even while a correction is in progress.
 bool levelerFreezesGainWhenFeedbackBelowSilenceThreshold()
 {
     constexpr int sampleRate = 8000;
+    constexpr int tenMsSamples = sampleRate / 100;
     constexpr double TOLERANCE_DB = 0.01;
 
-    g_testFeedbackLufs.store(-25.0f); // below target -- let a little gain drift accumulate
+    g_testFeedbackLufs.store(-25.0f); // below target -- a correction in progress
     LevelerStep step(sampleRate, +testFeedbackFn, std::make_shared<DiagnosticCsvLogger>());
 
     std::unique_ptr<short[]> rawInput(generateOneSecondSineWave(1000.0f, sampleRate));
     std::vector<short> inputVec(rawInput.get(), rawInput.get() + sampleRate);
 
-    runThroughLeveler(step, inputVec, sampleRate / 10);
+    auto beforePause = runThroughLeveler(step, inputVec, sampleRate / 10);
+    std::vector<short> lastBlockBefore(beforePause.end() - tenMsSamples, beforePause.end());
 
-    // Switch to a reading below the silence gate and run a full second
-    // through it first -- generously longer than the ~300ms grace period,
-    // so this burn-in absorbs the grace period's own continued drift
-    // before the snapshots below, which then only ever see genuinely
-    // frozen behavior.
-    g_testFeedbackLufs.store(-40.0f);
-    runThroughLeveler(step, inputVec, sampleRate / 10);
+    g_testFeedbackLufs.store(-40.0f); // below the -33 threshold -- a pause begins
+    auto duringPause = runThroughLeveler(step, inputVec, sampleRate / 10);
+    std::vector<short> firstBlockDuring(duringPause.begin(), duringPause.begin() + tenMsSamples);
+    std::vector<short> lastBlockDuring(duringPause.end() - tenMsSamples, duringPause.end());
 
-    auto snapshot1 = runThroughLeveler(step, inputVec, sampleRate / 10);
-    auto snapshot2 = runThroughLeveler(step, inputVec, sampleRate / 10);
-
-    double gainDiffDb = 20.0 * std::log10(measureRms(snapshot2) / measureRms(snapshot1));
-    if (std::abs(gainDiffDb) > TOLERANCE_DB)
+    double firstDiffDb = 20.0 * std::log10(measureRms(firstBlockDuring) / measureRms(lastBlockBefore));
+    double laterDiffDb = 20.0 * std::log10(measureRms(lastBlockDuring) / measureRms(lastBlockBefore));
+    if (std::abs(firstDiffDb) > TOLERANCE_DB || std::abs(laterDiffDb) > TOLERANCE_DB)
     {
-        std::cerr << "[gain drifted by " << gainDiffDb << "dB while feedback was below the silence threshold (well past the grace period), expected ~0]...";
-        return false;
-    }
-
-    return true;
-}
-
-// A gap shorter than the pause grace period should not freeze gain: while a
-// sizeable correction is in progress, gain should keep moving toward the
-// target established before the gap.
-bool levelerBridgesShortGapsViaGracePeriod()
-{
-    constexpr int sampleRate = 8000;
-    constexpr double TOLERANCE_DB = 0.05;
-
-    std::unique_ptr<short[]> rawInput(generateOneSecondSineWave(1000.0f, sampleRate));
-    std::vector<short> inputVec(rawInput.get(), rawInput.get() + sampleRate);
-    std::vector<short> shortInputVec(rawInput.get(), rawInput.get() + sampleRate / 10); // 100ms
-
-    g_testFeedbackLufs.store(-25.0f); // below target -- a real, sizeable ongoing correction
-    LevelerStep step(sampleRate, +testFeedbackFn, std::make_shared<DiagnosticCsvLogger>());
-    runThroughLeveler(step, inputVec, sampleRate / 10); // 1s warm-up, short of full convergence
-
-    auto gapStartSnapshot = runThroughLeveler(step, shortInputVec, sampleRate / 10);
-    g_testFeedbackLufs.store(-40.0f); // below the -33 threshold -- a gap begins
-    auto gapEndSnapshot = runThroughLeveler(step, shortInputVec, sampleRate / 10);
-
-    double gainDiffDb = 20.0 * std::log10(measureRms(gapEndSnapshot) / measureRms(gapStartSnapshot));
-    if (std::abs(gainDiffDb) < TOLERANCE_DB)
-    {
-        std::cerr << "[gain barely moved (" << gainDiffDb << "dB) across a 100ms gap, well under the ~300ms grace "
-                   << "period -- expected it to keep smoothing toward the already-established target, not freeze immediately]...";
-        return false;
-    }
-
-    return true;
-}
-
-// During the grace period the target must not be recomputed from the last
-// valid reading, which is often a word's quiet tail. Checked by the shape of
-// movement within a gap: sampled in four equal slices, movement should
-// shrink slice to slice (smoothing toward a fixed target). A target still
-// being recomputed and growing would give equal or larger movement.
-bool levelerDoesNotKeepChasingATrailingOffSampleDuringGracePeriod()
-{
-    constexpr int sampleRate = 8000;
-
-    g_testFeedbackLufs.store(-30.0f); // well below target -- a real, sizeable ongoing correction
-    LevelerStep step(sampleRate, +testFeedbackFn, std::make_shared<DiagnosticCsvLogger>());
-
-    std::unique_ptr<short[]> rawInput(generateOneSecondSineWave(1000.0f, sampleRate));
-    std::vector<short> inputVec(rawInput.get(), rawInput.get() + sampleRate);
-    double inputRms = measureRms(inputVec);
-
-    runThroughLeveler(step, inputVec, sampleRate / 10); // 1s warm-up, short of full convergence
-    double gainAtGapStart = 20.0 * std::log10(measureRms(runThroughLeveler(step, inputVec, sampleRate / 10)) / inputRms) + HANDOVER_DB;
-
-    // Go invalid for a 200ms gap (well under the default 300ms grace
-    // period), sampled in four 50ms slices to see the shape of movement
-    // *within* the gap, not just its start/end.
-    g_testFeedbackLufs.store(-40.0f);
-    std::vector<short> sliceInputVec(rawInput.get(), rawInput.get() + sampleRate / 20); // 50ms
-
-    double sliceGainsDb[4];
-    double prevGain = gainAtGapStart;
-    double absDeltas[4];
-    for (int i = 0; i < 4; i++)
-    {
-        auto sliceOutput = runThroughLeveler(step, sliceInputVec, sampleRate / 10);
-        sliceGainsDb[i] = 20.0 * std::log10(measureRms(sliceOutput) / inputRms) + HANDOVER_DB;
-        absDeltas[i] = std::abs(sliceGainsDb[i] - prevGain);
-        prevGain = sliceGainsDb[i];
-    }
-
-    // The last slice's movement should be clearly smaller than the
-    // first's -- smoothing toward a target that stopped moving after the
-    // gap began, not one still growing away from a repeatedly re-derived
-    // stale sample.
-    if (absDeltas[3] >= absDeltas[0])
-    {
-        std::cerr << "[gain movement within the gap didn't shrink over time (first slice " << absDeltas[0]
-                   << "dB, last slice " << absDeltas[3] << "dB) -- expected smoothing toward a fixed target, "
-                   << "not one still being re-derived and growing away from a stale sample]...";
+        std::cerr << "[gain moved " << firstDiffDb << "dB in the first 10ms of a pause and " << laterDiffDb
+                   << "dB after 1s, expected it held from the start]...";
         return false;
     }
 
@@ -462,8 +378,6 @@ int main()
     TEST_CASE(levelerConvergesTowardExpectedGainForQuietFeedback);
     TEST_CASE(levelerConvergesTowardConfigurableTarget);
     TEST_CASE(levelerFreezesGainWhenFeedbackBelowSilenceThreshold);
-    TEST_CASE(levelerBridgesShortGapsViaGracePeriod);
-    TEST_CASE(levelerDoesNotKeepChasingATrailingOffSampleDuringGracePeriod);
     TEST_CASE(levelerThresholdBehavesTheSameBothWaysNow);
     TEST_CASE(levelerResetPreservesGain);
     TEST_CASE(levelerCanBeSeededWithSavedGain);
