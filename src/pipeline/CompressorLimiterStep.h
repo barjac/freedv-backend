@@ -38,6 +38,7 @@
 #define AUDIO_PIPELINE__COMPRESSOR_LIMITER_STEP_H
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 
 #include "IPipelineStep.h"
@@ -49,9 +50,14 @@
 // compressionGaindB=0, applies a fixed internal ~3:1 compression ratio with
 // makeup gain rather than acting as a pure limiter).
 //
-// A per-sample envelope follower with a short look-ahead delay line drives
-// a single high-ratio soft knee just below full scale, so it only engages
-// on loud excursions near clipping and leaves ordinary speech untouched.
+// Look-ahead peak limiter driving a single high-ratio soft knee just below
+// full scale, so it only engages on loud excursions near clipping and
+// leaves ordinary speech untouched. The audio is delayed by the look-ahead
+// window; the gain each sample needs is held at its minimum across the
+// window, then smoothed by a moving average of the same length. The gain
+// therefore ramps down smoothly ahead of each peak and is fully in place
+// when the peak reaches the output, so peaks never overshoot the knee
+// curve, however sudden their onset.
 // Leaving speech dynamics alone matters because the RADE encoder is
 // expected to have been trained on uncompressed speech. A lower
 // "compressor" knee was tried and removed: its frequent gain reduction fed
@@ -97,18 +103,33 @@ private:
     std::shared_ptr<DiagnosticCsvLogger> diagLogger_;
     realtime_fp<bool()> noiseReductionEnabledFn_;
 
-    // Look-ahead ring buffer: lookAheadBuffer_[lookAheadPos_] holds the
-    // sample from lookAheadLength_ samples ago. lookAheadLength_ must be
-    // declared before lookAheadBuffer_ since the buffer is sized from it in
-    // the constructor's init list.
-    int lookAheadLength_;
-    std::unique_ptr<float[]> lookAheadBuffer_;
-    int lookAheadPos_;
+    // Returns the minimum of the last windowLength_ values passed in.
+    float slidingMinimum_(float value) FREEDV_NONBLOCKING;
 
-    // Smoothed gain-reduction command in dB (always <= 0).
-    float smoothedGainReductionDb_;
-    float attackAlpha_;
+    // Look-ahead window length in samples. Must be declared before the
+    // buffers below, which are sized from it in the constructor's init list.
+    int windowLength_;
+
+    // Audio delay line, windowLength_ - 1 samples.
+    std::unique_ptr<float[]> delayBuffer_;
+    int delayPos_;
+
+    // Sliding-minimum ring buffer (monotonic queue) of required gains.
+    std::unique_ptr<float[]> holdValues_;
+    std::unique_ptr<int64_t[]> holdIndices_;
+    int holdHead_;
+    int holdCount_;
+    int64_t sampleIndex_;
+
+    // Held gain after release smoothing (linear, <= 1).
+    float releasedGain_;
     float releaseAlpha_;
+
+    // Moving average of releasedGain_ over windowLength_ samples.
+    std::unique_ptr<float[]> averageBuffer_;
+    double averageSum_;
+    int averagePos_;
+
     float inputHeadroomScale_;
 
     std::unique_ptr<short[]> outputSamples_;

@@ -276,6 +276,53 @@ bool levelerGainAboveFullScaleIsLimitedNotClipped()
     return true;
 }
 
+// A tone that starts abruptly above full scale must be limited from its
+// very first cycle: the output peak must not exceed the knee curve's
+// output for that level (-1.5dBFS + overshoot/20), and no samples may hit
+// the int16 saturation backstop. Covers low/high voice frequencies, sample
+// rates, and levels up to the leveler's +12dB maximum gain on a full-scale
+// input.
+bool compressorLimiterCatchesSuddenOnsets()
+{
+    constexpr double THRESHOLD_DB = -1.5;
+    constexpr double RATIO = 20.0;
+    constexpr double TOLERANCE_DB = 0.1;
+
+    for (int sampleRate : {8000, 16000, 48000})
+    for (double freqHz : {150.0, 300.0, 1000.0})
+    for (double truePeakDb : {2.1, 6.0, 12.0})
+    {
+        CompressorLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>());
+
+        // 200ms of silence, then the tone starting at a positive peak.
+        std::vector<short> input(sampleRate / 5, 0);
+        double amplitude = 32767.0 * std::pow(10.0, truePeakDb / 20.0) * HANDOVER_SCALE;
+        for (int n = 0; n < sampleRate / 5; n++)
+        {
+            input.push_back(static_cast<short>(amplitude * std::cos(2.0 * M_PI * freqHz * n / sampleRate)));
+        }
+        auto output = runThroughStep(step, input, sampleRate / 100);
+
+        int saturated = 0;
+        for (short v : output)
+        {
+            if (v >= 32767 || v <= -32767) saturated++;
+        }
+        double outputPeakDb = measurePeakDbfs(output);
+        double expectedMaxDb = THRESHOLD_DB + (truePeakDb - THRESHOLD_DB) / RATIO;
+
+        if (saturated > 0 || outputPeakDb > expectedMaxDb + TOLERANCE_DB)
+        {
+            std::cerr << "[" << freqHz << "Hz at " << sampleRate << "Hz, true peak +" << truePeakDb
+                       << "dBFS: output peak " << outputPeakDb << "dBFS (limit " << expectedMaxDb
+                       << "), " << saturated << " saturated samples]...";
+            return false;
+        }
+    }
+
+    return true;
+}
+
 int main()
 {
     TEST_CASE(compressorLimiterLeavesQuietSignalUnaffected);
@@ -283,5 +330,6 @@ int main()
     TEST_CASE(compressorLimiterResetClearsGainReductionState);
     TEST_CASE(compressorLimiterUsesLooserSilenceFloorWithNoiseReductionOff);
     TEST_CASE(levelerGainAboveFullScaleIsLimitedNotClipped);
+    TEST_CASE(compressorLimiterCatchesSuddenOnsets);
     return 0;
 }
