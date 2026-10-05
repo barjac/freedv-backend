@@ -1,7 +1,7 @@
 //=========================================================================
 // Name:            DiagnosticCsvLogger.cpp
-// Purpose:         Diagnostic-only CSV logger for the leveler and
-//                  compressor/limiter pipeline steps.
+// Purpose:         Diagnostic-only CSV logger for the leveler/limiter
+//                  pipeline step.
 //
 // Authors:         Claude Code (for Barry Jackson, G4MKT)
 // License:
@@ -40,8 +40,6 @@
 
 DiagnosticCsvLogger::DiagnosticCsvLogger()
     : file_(nullptr)
-    , pendingHead_(0)
-    , pendingCount_(0)
 {
 #if defined(FREEDV_ENABLE_AUDIO_DIAG_LOGGING)
     const char* home = std::getenv("HOME");
@@ -69,29 +67,10 @@ DiagnosticCsvLogger::~DiagnosticCsvLogger()
     }
 }
 
-void DiagnosticCsvLogger::logLevelerHalf(double inputDbfs, double feedbackLufs, double targetGainDb, double currentGainDb, double appliedGainDb) FREEDV_NONBLOCKING
+void DiagnosticCsvLogger::logChunk(double inputDbfs, double feedbackLufs, double targetGainDb, double currentGainDb, double appliedGainDb,
+                                   double gainReductionDb, double outputDbfs) FREEDV_NONBLOCKING
 {
     if (file_ == nullptr) return;
-
-    if (pendingCount_ >= PENDING_QUEUE_CAPACITY)
-    {
-        // Overflow -- drop the oldest unflushed row (see header comment).
-        pendingHead_ = (pendingHead_ + 1) % PENDING_QUEUE_CAPACITY;
-        pendingCount_--;
-    }
-
-    int tail = (pendingHead_ + pendingCount_) % PENDING_QUEUE_CAPACITY;
-    pendingQueue_[tail] = PendingRow{inputDbfs, feedbackLufs, targetGainDb, currentGainDb, appliedGainDb};
-    pendingCount_++;
-}
-
-void DiagnosticCsvLogger::logCompressorLimiterHalfAndFlush(double gainReductionDb, double outputDbfs) FREEDV_NONBLOCKING
-{
-    if (file_ == nullptr || pendingCount_ == 0) return;
-
-    PendingRow row = pendingQueue_[pendingHead_];
-    pendingHead_ = (pendingHead_ + 1) % PENDING_QUEUE_CAPACITY;
-    pendingCount_--;
 
     auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - startTime_).count();
@@ -101,8 +80,8 @@ void DiagnosticCsvLogger::logCompressorLimiterHalfAndFlush(double gainReductionD
     // ENABLE_AUDIO_DIAG_LOGGING.
     FREEDV_BEGIN_VERIFIED_SAFE
     fprintf(file_, "%lld,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
-        (long long)elapsedMs, row.inputDbfs, row.feedbackLufs,
-        row.targetGainDb, row.currentGainDb, row.appliedGainDb, gainReductionDb, outputDbfs);
+        (long long)elapsedMs, inputDbfs, feedbackLufs,
+        targetGainDb, currentGainDb, appliedGainDb, gainReductionDb, outputDbfs);
     fflush(file_);
     FREEDV_END_VERIFIED_SAFE
 }

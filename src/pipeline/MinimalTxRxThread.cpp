@@ -38,8 +38,7 @@ using namespace std::chrono_literals;
 #include "MinimalTxRxThread.h"
 #include "../pipeline/paCallbackData.h"
 
-#include "../../pipeline/LevelerStep.h"
-#include "../../pipeline/CompressorLimiterStep.h"
+#include "../../pipeline/LevelerLimiterStep.h"
 #include "../../pipeline/RNNoiseStep.h"
 #include "../../pipeline/ResampleStep.h"
 #include "../../pipeline/LevelAdjustStep.h"
@@ -88,16 +87,10 @@ void MinimalTxRxThread::initializePipeline_()
 
         if (!disableProcessing_)
         {
-            auto diagLogger = std::make_shared<DiagnosticCsvLogger>();
-            auto compressorLimiterStep = new CompressorLimiterStep(txStep_->getInputSampleRate(), diagLogger);
-            auto levelerStep = new LevelerStep(
-                txStep_->getInputSampleRate(),
-                +[]() FREEDV_NONBLOCKING { return CompressorLimiterStep::getLastOutputLoudnessLufs(); },
-                diagLogger);
+            auto levelerLimiterStep = new LevelerLimiterStep(txStep_->getInputSampleRate(), std::make_shared<DiagnosticCsvLogger>());
             auto rnnoiseStep = new RNNoiseStep();
             pipeline_->appendPipelineStep(rnnoiseStep);
-            pipeline_->appendPipelineStep(levelerStep);
-            pipeline_->appendPipelineStep(compressorLimiterStep);
+            pipeline_->appendPipelineStep(levelerLimiterStep);
         }
 
         pipeline_->appendPipelineStep(txStep_);

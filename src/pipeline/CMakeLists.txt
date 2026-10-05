@@ -1,11 +1,10 @@
 add_library(fdv_audio_pipeline STATIC
     AudioPipeline.cpp
     BandwidthExpandStep.cpp
-    CompressorLimiterStep.cpp
     EitherOrStep.cpp
     IPipelineStep.cpp
     LevelAdjustStep.cpp
-    LevelerStep.cpp
+    LevelerLimiterStep.cpp
     LinkStep.cpp
     MinimalRealTimeHelper.cpp
     MinimalTxRxThread.cpp
@@ -41,8 +40,7 @@ macro(DefineUnitTest utName)
         PROPERTIES BUILD_RPATH "${CMAKE_BUILD_RPATH};${rade_BINARY_DIR}/src")
 endmacro()
 
-DefineUnitTest(LevelerStepTest)
-DefineUnitTest(CompressorLimiterStepTest)
+DefineUnitTest(LevelerLimiterStepTest)
 DefineUnitTest(AudioPipelineTest)
 DefineUnitTest(EitherOrTest)
 DefineUnitTest(LevelAdjustTest)
