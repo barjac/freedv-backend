@@ -1,7 +1,7 @@
 //=========================================================================
 // Name:            DiagnosticCsvLogger.h
-// Purpose:         Diagnostic-only CSV logger for the leveler and
-//                  compressor/limiter pipeline steps.
+// Purpose:         Diagnostic-only CSV logger for the leveler/limiter
+//                  pipeline step.
 //
 // Authors:         Claude Code (for Barry Jackson, G4MKT)
 // License:
@@ -43,48 +43,24 @@
 
 // Diagnostic only, not for production use. Opens and writes ~/agc_diag.csv
 // only when built with -DENABLE_AUDIO_DIAG_LOGGING=ON (see the top-level
-// CMakeLists.txt); otherwise every call is a cheap no-op, so LevelerStep
-// and CompressorLimiterStep can always be wired to a shared instance.
+// CMakeLists.txt); otherwise every call is a cheap no-op, so
+// LevelerLimiterStep can always be given an instance.
 //
-// Writes one row per ~10ms processing chunk. LevelerStep queues the first
-// half of each row via logLevelerHalf(); CompressorLimiterStep completes
-// and writes it via logCompressorLimiterHalfAndFlush(). Rows are queued
-// (FIFO) rather than held in a single slot because LevelerStep processes
-// all chunks of a pipeline buffer before CompressorLimiterStep sees any of
-// them. Both steps use identical chunk boundaries and see the same sample
-// count per call, so the queue drains to empty after each buffer.
+// Writes one row per ~10ms processing chunk.
 class DiagnosticCsvLogger
 {
 public:
     DiagnosticCsvLogger();
     ~DiagnosticCsvLogger();
 
-    void logLevelerHalf(double inputDbfs, double feedbackLufs, double targetGainDb, double currentGainDb, double appliedGainDb) FREEDV_NONBLOCKING;
-    void logCompressorLimiterHalfAndFlush(double gainReductionDb, double outputDbfs) FREEDV_NONBLOCKING;
+    // appliedGainDb differs from currentGainDb only during the leveler's
+    // startup ramp-in (see STARTUP_RAMP_SEC in LevelerLimiterStep.cpp).
+    void logChunk(double inputDbfs, double feedbackLufs, double targetGainDb, double currentGainDb, double appliedGainDb,
+                  double gainReductionDb, double outputDbfs) FREEDV_NONBLOCKING;
 
 private:
-    struct PendingRow
-    {
-        double inputDbfs;
-        double feedbackLufs;
-        double targetGainDb;
-        double currentGainDb;
-        // Differs from currentGainDb only during LevelerStep's startup
-        // ramp-in (see STARTUP_RAMP_SEC in LevelerStep.cpp).
-        double appliedGainDb;
-    };
-
-    // Fixed capacity (no allocation in the audio path), far more than the
-    // number of ~10ms chunks in any real buffer. On overflow the oldest
-    // unflushed row is dropped.
-    static constexpr int PENDING_QUEUE_CAPACITY = 64;
-
     FILE* file_;
     std::chrono::steady_clock::time_point startTime_;
-
-    PendingRow pendingQueue_[PENDING_QUEUE_CAPACITY];
-    int pendingHead_;
-    int pendingCount_;
 };
 
 #endif // UTIL__DIAGNOSTIC_CSV_LOGGER_H
