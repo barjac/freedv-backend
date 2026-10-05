@@ -67,7 +67,6 @@ private:
     GenericFIFO<short> inputSampleFifo_;
     std::unique_ptr<short[]> outputSamples_;
     std::unique_ptr<short[]> tmpInput_;
-    std::unique_ptr<float[]> tmpInputFloat_;
 
     bool enableLimiter_;
     bool enableLeveler_;

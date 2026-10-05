@@ -49,7 +49,7 @@ constexpr float AGC_MIN_GAIN_DB = -12.0;
 constexpr float AGC_ATTACK_RATE_DB_PER_SEC = -1;
 constexpr float AGC_DECAY_RATE_DB_PER_SEC = 1;
 constexpr float SILENCE_THRESHOLD_LUFS = -33.0;
-constexpr int LIMITER_LEVEL_DB = -1;
+constexpr int LIMITER_LEVEL_DB = -4;
 
 constexpr int TEN_MS_DIVIDER = 100;
 constexpr int MAX_AGC_SAMPLES = 160;
@@ -103,7 +103,7 @@ AgcStep::AgcStep(int sampleRate, bool enableLimiter, bool enableLeveler)
         agcState_ = nullptr;
     }
 
-    ebur128State_ = ebur128_init(1, sampleRate_, EBUR128_MODE_M);
+    ebur128State_ = ebur128_init(1, sampleRate_, EBUR128_MODE_S);
     assert(ebur128State_ != nullptr);
 
     // Pre-allocate buffers so we don't have to do so during real-time operation.
@@ -112,8 +112,6 @@ AgcStep::AgcStep(int sampleRate, bool enableLimiter, bool enableLeveler)
 
     tmpInput_ = std::make_unique<short[]>(numSamplesPerRun_);
     assert(tmpInput_ != nullptr);
-    tmpInputFloat_ = std::make_unique<float[]>(numSamplesPerRun_);
-    assert(tmpInputFloat_ != nullptr);
 }
 
 AgcStep::~AgcStep()
@@ -164,8 +162,6 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
             *numOutputSamples += numSamplesPerRun_;
             inputSampleFifo_.read(tmpInput, numSamplesPerRun_);
 
-            ConvertToFloatSampleType_<float, short>(tmpInput, tmpInputFloat_.get(), numSamplesPerRun_);
-
             if (enableLeveler_)
             {
                 // Step 1: feed samples into ebur128 every block (cheap -- this is
@@ -183,7 +179,7 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
                 if (++blocksSinceLoudnessUpdate_ >= LOUDNESS_UPDATE_INTERVAL_BLOCKS)
                 {
                     blocksSinceLoudnessUpdate_ = 0;
-                    result = ebur128_loudness_momentary(state, &lufs);
+                    result = ebur128_loudness_shortterm(state, &lufs);
                     loudnessUpdated = true;
                 }
                 FREEDV_END_VERIFIED_SAFE
@@ -229,22 +225,31 @@ short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutput
     
                 // Scale samples based on current gain.
                 float scaleFactor = expf(currentGainDb_/20.0f * logf(10.0f));
+                float temp = 0;
                 for (auto ctr = 0; ctr < numSamplesPerRun_; ctr++)
                 {
-                    tmpInputFloat_[ctr] *= scaleFactor;
+                    ConvertSingleSampleToFloatSampleType_<float, short>(&tmpInput[ctr], &temp);
+                    temp *= scaleFactor;
+                    ConvertSingleSampleToIntSampleType_<short, float>(&temp, &tmpInput[ctr]);
                 }
             }
 
             // Run WebRTC to make sure we don't clip.
             if (enableLimiter_)
             {
-                for (auto ctr = 0; ctr < numSamplesPerRun_; ctr++)
-                {
-                    tmpInputFloat_[ctr] -= (1.0f/3.0f) * std::pow(tmpInputFloat_[ctr], 3);
-                }
+                int outMicLevel = 0;
+                int inMicLevel = 0;
+                short echo = 0;
+                unsigned char saturationWarning = 1;
+                WebRtcAgc_Process(
+                    agcState_, const_cast<const int16_t *const *>(&tmpInput), 1, numSamplesPerRun_, 
+                    const_cast<int16_t *const *>(&tmpOutput), inMicLevel, &outMicLevel, echo, &saturationWarning);
+            }
+            else
+            {
+                memcpy(tmpOutput, tmpInput, numSamplesPerRun_ * sizeof(short));
             }
 
-            ConvertToIntSampleType_<short, float>(tmpInputFloat_.get(), tmpOutput, numSamplesPerRun_);
             tmpOutput += numSamplesPerRun_;
         }
     }
