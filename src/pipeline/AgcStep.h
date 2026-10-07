@@ -69,28 +69,25 @@ private:
     GenericFIFO<short> inputSampleFifo_;
     std::unique_ptr<short[]> outputSamples_;
     std::unique_ptr<short[]> tmpInput_;
-    std::unique_ptr<float[]> tmpInputFloat_;
 
     bool enableLimiter_;
     bool enableLeveler_;
 
-    // COMPARISON-BRANCH ONLY (1485-diag-tests, 2026-09-28) -- writes the
-    // same 7-column schema LevelerStep/CompressorLimiterStep use on
-    // bcj-backend-audio-dev (elapsed_ms,input_dbfs,feedback_lufs,
-    // leveler_target_gain_db,leveler_current_gain_db,
-    // comp_limiter_gain_reduction_db,output_dbfs) so the existing
-    // agc_ptt_capture.sh/agc_diag_wide_plot.py tooling works unchanged
-    // against this branch for a direct before/after comparison. Not
-    // gated behind a CMake option (unlike the other branch) since this
-    // is explicitly a throwaway test branch, never intended to merge --
-    // see PR #1485's own "DO NOT MERGE - TEST BRANCH ONLY".
-    // comp_limiter_gain_reduction_db here is an approximation: the cubic
-    // soft-clip has no single "gain" value the way a real limiter does,
-    // so it's measured as 20*log10(peakOut/peakIn) across just the clip
-    // stage itself (post-leveler, pre-clip vs. post-clip), isolating its
-    // effect from the leveler's own gain the same way the real
-    // CompressorLimiterStep's column isolates its own action.
+    // COMPARISON-BRANCH ONLY (1485-diag-tests). Writes ~/agc_diag.csv in
+    // the same schema as freedv-backend's DiagnosticCsvLogger, so the
+    // existing capture/plot tools work unchanged, plus three extra columns
+    // at the end: short-term loudness after the leveler and after the
+    // WebRTC limiter (requested on PR #1485), and the number of samples
+    // saturated at int16 by the leveler's gain before the limiter.
+    // comp_limiter_gain_reduction_db is 20*log10(peakOut/peakPreLimiter)
+    // per block. Not gated behind a CMake option: this is a throwaway
+    // test branch, never intended to merge.
     float lastLoggedLufs_;
+    float lastPostLevelerShortTermLufs_;
+    float lastOutputShortTermLufs_;
+    int diagBlocksSinceUpdate_;
+    void* diagPostLevelerEbur128_;
+    void* diagOutputEbur128_;
     FILE* diagCsvFile_;
     std::chrono::steady_clock::time_point diagStartTime_;
 };
