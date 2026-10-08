@@ -45,16 +45,17 @@
 constexpr float LEVELER_GAIN_LIMIT_DB = 12.0f; // symmetric +/-12dB
 
 // Smoothing time constant for current gain moving toward target gain.
-// Symmetric (same rise and fall).
-constexpr float LEVELER_TIME_CONSTANT_SEC = 2.0f;
+// Symmetric (same rise and fall). 4s rather than 2s halves phrase-to-phrase
+// gain wander in speech (test value).
+constexpr float LEVELER_TIME_CONSTANT_SEC = 4.0f;
 
 // PI controller. The measured loudness already includes the gain being
-// applied, so a proportional term on its own settles at only half the
-// required correction; the integral term removes that remaining error so
-// the output converges on the target. The integral time constant is longer
-// than LEVELER_TIME_CONSTANT_SEC because its job is only to remove that
-// persistent offset, not to react quickly.
-constexpr float LEVELER_KP = 1.0f;
+// applied, so a proportional term on its own settles short of the required
+// correction; the integral term removes that remaining error so the output
+// converges on the target. Kp is below 1 so that each 400ms momentary
+// reading moves the gain less; the integral term does the steady work
+// (test value).
+constexpr float LEVELER_KP = 0.5f;
 constexpr float LEVELER_INTEGRAL_TIME_CONSTANT_SEC = 4.0f;
 
 // Feedback at or below this is treated as a pause in speech and gain is
