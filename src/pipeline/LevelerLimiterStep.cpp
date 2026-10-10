@@ -58,11 +58,20 @@ constexpr float LEVELER_TIME_CONSTANT_SEC = 4.0f;
 constexpr float LEVELER_KP = 0.5f;
 constexpr float LEVELER_INTEGRAL_TIME_CONSTANT_SEC = 4.0f;
 
-// Feedback at or below this is treated as a pause in speech and gain is
-// held. The RNNoise-on/off values are kept separate so they can be tuned
+// An input level at or below this is treated as a pause in speech and gain
+// is held. The RNNoise-on/off values are kept separate so they can be tuned
 // independently; measured room noise with RNNoise off (~-34 LUFS) put the
 // off value at the same level as the on value for now.
-constexpr float SILENCE_THRESHOLD_LUFS_RNNOISE_ON = -33.0f;
+//
+// The test is on the INPUT level (the output loudness minus the gain being
+// applied), not the output (test). On the output, a low gain after a loud
+// passage made normal speech read below -33 and count as a pause, so the
+// gain stayed trapped low. On the input, -33 counted soft speech from a
+// quieter microphone as pause and settled ~1dB low; -36 is accurate and
+// still well above room noise with RNNoise on (~-40 before RNNoise). With
+// RNNoise off the room noise reaches the leveler, so that stays at -33
+// until it's measured.
+constexpr float SILENCE_THRESHOLD_LUFS_RNNOISE_ON = -36.0f;
 constexpr float SILENCE_THRESHOLD_LUFS_RNNOISE_OFF = -33.0f;
 
 // Startup ramp-in. When the leveler is seeded with a saved gain, applying
@@ -234,7 +243,8 @@ short* LevelerLimiterStep::execute(short* inputSamples, int numInputSamples, int
         // (or no reading yet).
         float feedbackLufs = lastOutputLoudnessLufs_;
         float silenceThresholdLufs = noiseReductionEnabled ? SILENCE_THRESHOLD_LUFS_RNNOISE_ON : SILENCE_THRESHOLD_LUFS_RNNOISE_OFF;
-        bool feedbackValid = feedbackLufs > silenceThresholdLufs;
+        // Input level = output loudness minus the gain (see the thresholds).
+        bool feedbackValid = feedbackLufs > -99.0f && feedbackLufs - currentGainDb_ > silenceThresholdLufs;
 
         // Input peak for this chunk, needed before gain is applied to
         // decide whether the startup ramp has started.
