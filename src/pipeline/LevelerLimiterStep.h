@@ -133,6 +133,17 @@ private:
     float rampElapsedSec_;
     std::atomic<float> liveAppliedGainDb_;
 
+    // Pause rollback: the controller state for each recent 10ms chunk, so
+    // that once a pause is long enough the state can be put back to how it
+    // was before the phrase tailed off (see PAUSE_ROLLBACK_SEC).
+    int historyLength_;
+    std::unique_ptr<float[]> historyTargetGainDb_;
+    std::unique_ptr<float[]> historyCurrentGainDb_;
+    std::unique_ptr<float[]> historyIntegralErrorDb_;
+    int historyPos_;
+    int historyCount_;
+    int pauseChunks_;
+
     // Output loudness measurement, the leveler's feedback.
     LoudnessMeter loudnessMeter_;
     float lastOutputLoudnessLufs_;

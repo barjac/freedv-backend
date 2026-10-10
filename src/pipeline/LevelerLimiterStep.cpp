@@ -73,6 +73,19 @@ constexpr float SILENCE_THRESHOLD_LUFS_RNNOISE_OFF = -33.0f;
 // Has no effect on an unseeded session, where gain starts at 0dB.
 constexpr float STARTUP_RAMP_SEC = 0.3f;
 
+// Pause rollback (test). The end of a phrase often tails off below the target
+// but above the silence threshold, so the controller raises the gain just
+// before a pause, and the pause then holds that lift into the next phrase.
+// Once a pause has lasted PAUSE_ROLLBACK_MIN_PAUSE_SEC, the controller state
+// is put back to how it was PAUSE_ROLLBACK_SEC before the pause began. Short
+// gaps between words are left alone. Gating the controller on falling
+// loudness instead was tried offline and biased the level low, because it
+// only discards the quiet readings.
+constexpr float PAUSE_ROLLBACK_SEC = 2.0f;
+constexpr float PAUSE_ROLLBACK_MIN_PAUSE_SEC = 1.0f;
+constexpr int PAUSE_ROLLBACK_CHUNKS = (int)(PAUSE_ROLLBACK_SEC * 100);
+constexpr int PAUSE_ROLLBACK_MIN_PAUSE_CHUNKS = (int)(PAUSE_ROLLBACK_MIN_PAUSE_SEC * 100);
+
 // Peak level (-20dBFS) that counts as real audio for starting the ramp.
 // Deliberately well above typical background noise with RNNoise off, so the
 // ramp isn't used up on hiss before speech starts.
@@ -159,6 +172,13 @@ LevelerLimiterStep::LevelerLimiterStep(int sampleRate, std::shared_ptr<Diagnosti
     , holdValues_(std::make_unique<float[]>(windowLength_))
     , holdIndices_(std::make_unique<int64_t[]>(windowLength_))
     , averageBuffer_(std::make_unique<float[]>(windowLength_))
+    , historyLength_(PAUSE_ROLLBACK_CHUNKS + PAUSE_ROLLBACK_MIN_PAUSE_CHUNKS + 1)
+    , historyTargetGainDb_(std::make_unique<float[]>(historyLength_))
+    , historyCurrentGainDb_(std::make_unique<float[]>(historyLength_))
+    , historyIntegralErrorDb_(std::make_unique<float[]>(historyLength_))
+    , historyPos_(0)
+    , historyCount_(0)
+    , pauseChunks_(0)
 {
     assert(delayBuffer_ != nullptr && holdValues_ != nullptr && holdIndices_ != nullptr && averageBuffer_ != nullptr);
 
@@ -286,6 +306,32 @@ short* LevelerLimiterStep::execute(short* inputSamples, int numInputSamples, int
             // step. Held during pauses.
             currentGainDb_ += ((targetGainDb_ - currentGainDb_) / LEVELER_TIME_CONSTANT_SEC) * blockDurationSec;
         }
+
+        // Pause rollback (see PAUSE_ROLLBACK_SEC). The state is recorded
+        // for every chunk, including held ones, so the history is in time.
+        if (enabled && !feedbackValid)
+        {
+            pauseChunks_++;
+            // chunks back from now to PAUSE_ROLLBACK_SEC before the pause's
+            // first chunk
+            int back = pauseChunks_ - 1 + PAUSE_ROLLBACK_CHUNKS;
+            if (pauseChunks_ == PAUSE_ROLLBACK_MIN_PAUSE_CHUNKS && back < historyCount_)
+            {
+                int idx = (historyPos_ - back + historyLength_) % historyLength_;
+                targetGainDb_ = historyTargetGainDb_[idx];
+                currentGainDb_ = historyCurrentGainDb_[idx];
+                integralErrorDb_ = historyIntegralErrorDb_[idx];
+            }
+        }
+        else
+        {
+            pauseChunks_ = 0;
+        }
+        historyTargetGainDb_[historyPos_] = targetGainDb_;
+        historyCurrentGainDb_[historyPos_] = currentGainDb_;
+        historyIntegralErrorDb_[historyPos_] = integralErrorDb_;
+        historyPos_ = (historyPos_ + 1) % historyLength_;
+        if (historyCount_ < historyLength_) historyCount_++;
 
         // Step 4: gain to apply, scaled down during the startup ramp-in.
         // Only the applied gain is ramped; the controller state is
