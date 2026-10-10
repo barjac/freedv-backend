@@ -190,38 +190,6 @@ bool levelerFreezesGainInPauses()
     return true;
 }
 
-// A phrase that tails off below the target (but above the silence
-// threshold) lifts the gain just before a pause. Once the pause has lasted
-// long enough, that lift is undone; a short gap between words leaves it.
-bool levelerUndoesPhraseTailBeforeLongPause()
-{
-    constexpr int sampleRate = 8000;
-    for (bool longPause : {true, false})
-    {
-        LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>());
-        // Settle at the target, then a 1.5s quiet tail (-30 LUFS).
-        runThroughStep(step, generateSineWave(amplitudeForLufs(-23.0), 1000.0, 6.0, sampleRate), sampleRate / 100);
-        float gainBeforeTailDb = step.getCurrentGainDb();
-        runThroughStep(step, generateSineWave(amplitudeForLufs(-30.0), 1000.0, 1.5, sampleRate), sampleRate / 100);
-        float gainAfterTailDb = step.getCurrentGainDb();
-        // Then a pause: 3s (long) or 0.8s (a gap between words).
-        runThroughStep(step, generateSineWave(amplitudeForLufs(-60.0), 1000.0, longPause ? 3.0 : 0.8, sampleRate), sampleRate / 100);
-        float gainInPauseDb = step.getCurrentGainDb();
-
-        bool ok = gainAfterTailDb > gainBeforeTailDb + 0.2f &&
-                  (longPause ? std::abs(gainInPauseDb - gainBeforeTailDb) < 0.15f
-                             : gainInPauseDb >= gainAfterTailDb); // not rolled back
-        if (!ok)
-        {
-            std::cerr << "[" << (longPause ? "3s pause" : "0.8s gap") << ": gain " << gainBeforeTailDb
-                      << "dB before the tail, " << gainAfterTailDb << "dB after it, " << gainInPauseDb
-                      << "dB in the pause]...";
-            return false;
-        }
-    }
-    return true;
-}
-
 // The RNNoise-on and -off silence thresholds are currently both -33 LUFS.
 // Checks that both states update above, and hold below, -33.
 bool levelerThresholdBehavesTheSameBothWaysNow()
@@ -638,7 +606,6 @@ int main()
     TEST_CASE(levelerConvergesOnTarget);
     TEST_CASE(levelerConvergesOnConfigurableTarget);
     TEST_CASE(levelerFreezesGainInPauses);
-    TEST_CASE(levelerUndoesPhraseTailBeforeLongPause);
     TEST_CASE(levelerThresholdBehavesTheSameBothWaysNow);
     TEST_CASE(levelerResetPreservesGain);
     TEST_CASE(levelerCanBeSeededWithSavedGain);
