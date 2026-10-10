@@ -127,6 +127,9 @@ private:
     float currentGainDb_;
     // PI controller integral term (accumulated loudness error, dB*sec).
     float integralErrorDb_;
+    // Error averaged over FAST_ERROR_AVERAGE_SEC (speech only), for the
+    // fast mode.
+    float errorAverageDb_;
     // Startup ramp-in: rampStarted_ latches the first time real (non-silent)
     // input is seen; rampElapsedSec_ only advances after that.
     bool rampStarted_;

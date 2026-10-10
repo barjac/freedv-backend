@@ -211,6 +211,23 @@ bool levelerRecoversFromLowGainAfterLoudPassage()
     return true;
 }
 
+// A big, lasting change (here: gain at -8dB, as after a loud passage, then
+// normal speech) is corrected within a few seconds, not ~15s.
+bool levelerCorrectsBigChangeQuickly()
+{
+    constexpr int sampleRate = 8000;
+    LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), -8.0f, -8.0f * 4.0f, -26.0f);
+    // -28 LUFS in needs about +2dB.
+    runThroughStep(step, generateSineWave(amplitudeForLufs(-28.0), 1000.0, 5.0, sampleRate), sampleRate / 100);
+    float gainDb = step.getCurrentGainDb();
+    if (gainDb < 0.5f)
+    {
+        std::cerr << "[gain " << gainDb << "dB after 5s of -28 LUFS speech from -8dB (expected within ~1.5dB of +2)]...";
+        return false;
+    }
+    return true;
+}
+
 bool levelerThresholdBehavesTheSameBothWaysNow()
 {
     constexpr int sampleRate = 8000;
@@ -626,6 +643,7 @@ int main()
     TEST_CASE(levelerConvergesOnConfigurableTarget);
     TEST_CASE(levelerFreezesGainInPauses);
     TEST_CASE(levelerRecoversFromLowGainAfterLoudPassage);
+    TEST_CASE(levelerCorrectsBigChangeQuickly);
     TEST_CASE(levelerThresholdBehavesTheSameBothWaysNow);
     TEST_CASE(levelerResetPreservesGain);
     TEST_CASE(levelerCanBeSeededWithSavedGain);

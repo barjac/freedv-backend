@@ -58,6 +58,20 @@ constexpr float LEVELER_TIME_CONSTANT_SEC = 4.0f;
 constexpr float LEVELER_KP = 0.5f;
 constexpr float LEVELER_INTEGRAL_TIME_CONSTANT_SEC = 4.0f;
 
+// "Decisive fader" (test). The settings above move the gain slowly so that
+// it doesn't ride every phrase, but that also made a big change (moving
+// closer to or further from the microphone, a loud passage) take ~14s to
+// correct. While the error, averaged over FAST_ERROR_AVERAGE_SEC, is more
+// than FAST_ERROR_DB off target in either direction, the integral term
+// accumulates FAST_INTEGRAL_BOOST times faster and the gain smoothing uses
+// FAST_TIME_CONSTANT_SEC. A phrase tail is too short to build up that
+// average (a stretched 3s tail didn't trigger it offline), and ordinary
+// phrase-to-phrase changes stay below the threshold.
+constexpr float FAST_ERROR_DB = 4.0f;
+constexpr float FAST_ERROR_AVERAGE_SEC = 2.0f;
+constexpr float FAST_INTEGRAL_BOOST = 4.0f;
+constexpr float FAST_TIME_CONSTANT_SEC = 1.0f;
+
 // An input level at or below this is treated as a pause in speech and gain
 // is held. The RNNoise-on/off values are kept separate so they can be tuned
 // independently; measured room noise with RNNoise off (~-34 LUFS) put the
@@ -158,6 +172,7 @@ LevelerLimiterStep::LevelerLimiterStep(int sampleRate, std::shared_ptr<Diagnosti
     , targetGainDb_(initialGainDb)
     , currentGainDb_(initialGainDb)
     , integralErrorDb_(initialIntegralErrorDb)
+    , errorAverageDb_(0.0f)
     , rampStarted_(false)
     , rampElapsedSec_(0.0f)
     , liveAppliedGainDb_(0.0f)
@@ -282,7 +297,11 @@ short* LevelerLimiterStep::execute(short* inputSamples, int numInputSamples, int
             // Anti-windup: limit the integral term's contribution to the
             // gain range, so a long loud or quiet stretch can't build up
             // an excess that takes a long time to unwind.
-            integralErrorDb_ += instantErrorDb * blockDurationSec;
+            // Averaged error, for the fast mode (see FAST_ERROR_DB).
+            errorAverageDb_ += (instantErrorDb - errorAverageDb_) * std::min(1.0f, blockDurationSec / FAST_ERROR_AVERAGE_SEC);
+            bool fast = std::abs(errorAverageDb_) > FAST_ERROR_DB;
+
+            integralErrorDb_ += instantErrorDb * blockDurationSec * (fast ? FAST_INTEGRAL_BOOST : 1.0f);
             float integralClampDb = LEVELER_GAIN_LIMIT_DB * LEVELER_INTEGRAL_TIME_CONSTANT_SEC;
             if (integralErrorDb_ > integralClampDb) integralErrorDb_ = integralClampDb;
             if (integralErrorDb_ < -integralClampDb) integralErrorDb_ = -integralClampDb;
@@ -294,7 +313,8 @@ short* LevelerLimiterStep::execute(short* inputSamples, int numInputSamples, int
             // Step 3: move current gain a fraction of the way toward target
             // each chunk (first-order smoothing), rather than a fixed dB/sec
             // step. Held during pauses.
-            currentGainDb_ += ((targetGainDb_ - currentGainDb_) / LEVELER_TIME_CONSTANT_SEC) * blockDurationSec;
+            float smoothingSec = fast ? FAST_TIME_CONSTANT_SEC : LEVELER_TIME_CONSTANT_SEC;
+            currentGainDb_ += ((targetGainDb_ - currentGainDb_) / smoothingSec) * blockDurationSec;
         }
 
         // Step 4: gain to apply, scaled down during the startup ramp-in.
