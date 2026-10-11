@@ -190,8 +190,44 @@ bool levelerFreezesGainInPauses()
     return true;
 }
 
-// The RNNoise-on and -off silence thresholds are currently both -33 LUFS.
-// Checks that both states update above, and hold below, -33.
+// The silence thresholds are -36 LUFS (RNNoise on) and -33 (off), on the
+// input level. Checks that both states update at -30 and hold at -40.
+// After a loud passage the gain is low, so normal speech comes OUT below the
+// silence threshold. The pause test is on the input, so the gain must still
+// recover rather than staying trapped as if in a pause.
+bool levelerRecoversFromLowGainAfterLoudPassage()
+{
+    constexpr int sampleRate = 8000;
+    // Seeded at -8dB (as after a loud passage), speech at -28 LUFS in: the
+    // output is ~-36, below the threshold if it were measured on the output.
+    LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), -8.0f, -8.0f * 4.0f, -26.0f);
+    runThroughStep(step, generateSineWave(amplitudeForLufs(-28.0), 1000.0, 10.0, sampleRate), sampleRate / 100);
+    float gainDb = step.getCurrentGainDb();
+    if (gainDb < -2.0f)
+    {
+        std::cerr << "[gain " << gainDb << "dB after 10s of -28 LUFS speech from -8dB (expected recovering towards +2)]...";
+        return false;
+    }
+    return true;
+}
+
+// A big, lasting change (here: gain at -8dB, as after a loud passage, then
+// normal speech) is corrected within a few seconds, not ~15s.
+bool levelerCorrectsBigChangeQuickly()
+{
+    constexpr int sampleRate = 8000;
+    LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), -8.0f, -8.0f * 4.0f, -26.0f);
+    // -28 LUFS in needs about +2dB.
+    runThroughStep(step, generateSineWave(amplitudeForLufs(-28.0), 1000.0, 5.0, sampleRate), sampleRate / 100);
+    float gainDb = step.getCurrentGainDb();
+    if (gainDb < 0.5f)
+    {
+        std::cerr << "[gain " << gainDb << "dB after 5s of -28 LUFS speech from -8dB (expected within ~1.5dB of +2)]...";
+        return false;
+    }
+    return true;
+}
+
 bool levelerThresholdBehavesTheSameBothWaysNow()
 {
     constexpr int sampleRate = 8000;
@@ -606,6 +642,8 @@ int main()
     TEST_CASE(levelerConvergesOnTarget);
     TEST_CASE(levelerConvergesOnConfigurableTarget);
     TEST_CASE(levelerFreezesGainInPauses);
+    TEST_CASE(levelerRecoversFromLowGainAfterLoudPassage);
+    TEST_CASE(levelerCorrectsBigChangeQuickly);
     TEST_CASE(levelerThresholdBehavesTheSameBothWaysNow);
     TEST_CASE(levelerResetPreservesGain);
     TEST_CASE(levelerCanBeSeededWithSavedGain);
