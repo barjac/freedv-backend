@@ -43,6 +43,7 @@
 #endif // defined(__APPLE__)
 
 #include "../os/os_interface.h"
+#include "../util/logging/ulog.h"
 
 using namespace std::chrono_literals;
 
@@ -51,6 +52,8 @@ TapStep::TapStep(int sampleRate, IPipelineStep* tapStep)
     , sampleRate_(sampleRate)
     , endingTapThread_(false)
     , tapThreadInput_(sampleRate * 0.25f)
+    , consecutiveDrops_(0)
+    , samplesDropped_(0)
 {
     tapThread_ = std::thread([&]() {
         const int SAMPLE_RATE_AT_10MS = sampleRate_ / 100;
@@ -64,16 +67,24 @@ TapStep::TapStep(int sampleRate, IPipelineStep* tapStep)
         pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
 #endif // defined(__APPLE__)
 
-        while (!endingTapThread_)
-        {
+        auto processBufferedBlocks = [&]() {
             while (tapThreadInput_.numUsed() >= SAMPLE_RATE_AT_10MS)
             {
                 int temp = 0;
                 tapThreadInput_.read(fifoInput, SAMPLE_RATE_AT_10MS);
                 tapStep_->execute(fifoInput, SAMPLE_RATE_AT_10MS, &temp);
             }
+        };
+
+        while (!endingTapThread_)
+        {
+            processBufferedBlocks();
             sem_.wait();
         }
+
+        // Hand over whatever arrived before we were told to stop, so that
+        // e.g. a recording doesn't lose its last moments.
+        processBufferedBlocks();
 
         delete[] fifoInput;
     });
@@ -84,6 +95,11 @@ TapStep::~TapStep()
     endingTapThread_ = true;
     sem_.signal();
     tapThread_.join();
+
+    if (consecutiveDrops_ > 0)
+    {
+        log_warn("Tap FIFO was still full when stopped; tap is missing %d samples", samplesDropped_);
+    }
 }
 
 int TapStep::getInputSampleRate() const FREEDV_NONBLOCKING
@@ -102,16 +118,49 @@ short* TapStep::execute(short* inputSamples, int numInputSamples, int* numOutput
 
     *numOutputSamples = numInputSamples;
     short* tmpInputSamples = inputSamples;
+    int samplesDropped = 0;
     while (numInputSamples > 0)
     {
         int samplesToRead = std::min(sampleRate_ / 100, numInputSamples);
-        tapThreadInput_.write(tmpInputSamples, samplesToRead);
+        if (tapThreadInput_.write(tmpInputSamples, samplesToRead) != 0)
+        {
+            samplesDropped += samplesToRead;
+        }
         tmpInputSamples += samplesToRead;
         numInputSamples -= samplesToRead;
-        if (tapThreadInput_.numUsed() > (100 * sampleRate_ / 1000))
+    }
+
+    // Wake the tap thread as soon as there's a block for it to process. The
+    // longer it's left asleep, the less room there is for what arrives before
+    // it actually gets to run.
+    if (tapThreadInput_.numUsed() >= sampleRate_ / 100)
+    {
+        sem_.signal();
+    }
+
+    // write() is all-or-nothing, so a full FIFO means the tapped step never sees those
+    // samples. We can't wait for the tap thread to catch up (this is the audio path), but
+    // whatever the tap produces (e.g. a recording) is now missing audio, so say so rather
+    // than dropping it quietly. The tap thread is exactly what gets starved first when the
+    // machine is loaded.
+    if (samplesDropped > 0)
+    {
+        if (consecutiveDrops_ == 0)
         {
-            sem_.signal();
+            FREEDV_BEGIN_VERIFIED_SAFE
+            log_warn("Tap FIFO full, dropping %d samples (free=%d)", samplesDropped, tapThreadInput_.numFree());
+            FREEDV_END_VERIFIED_SAFE
         }
+        consecutiveDrops_++;
+        samplesDropped_ += samplesDropped;
+    }
+    else if (consecutiveDrops_ > 0)
+    {
+        FREEDV_BEGIN_VERIFIED_SAFE
+        log_warn("Tap FIFO drops ended after %d call(s); tap is missing %d samples", consecutiveDrops_, samplesDropped_);
+        FREEDV_END_VERIFIED_SAFE
+        consecutiveDrops_ = 0;
+        samplesDropped_ = 0;
     }
  
     return inputSamples;
