@@ -6,6 +6,10 @@
 #include "LevelerLimiterStep.h"
 #include "PipelineTestCommon.h"
 
+#ifndef M_PI // not defined by every C library (e.g. on Windows)
+#define M_PI 3.14159265358979323846
+#endif
+
 // Unit checks against synthetic tones, in the real closed loop (the
 // leveler's feedback is the step's own measured output loudness).
 // End-to-end behaviour on real speech is verified with the diagnostic CSV
