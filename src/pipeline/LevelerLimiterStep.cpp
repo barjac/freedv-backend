@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <utility>
 
 #include "LevelerLimiterStep.h"
 
@@ -164,7 +165,7 @@ LevelerLimiterStep::LevelerLimiterStep(int sampleRate, std::shared_ptr<Diagnosti
                                        realtime_fp<bool()> const& noiseReductionEnabledFn,
                                        realtime_fp<bool()> const& enabledFn)
     : sampleRate_(sampleRate)
-    , diagLogger_(diagLogger)
+    , diagLogger_(std::move(diagLogger))
     , noiseReductionEnabledFn_(noiseReductionEnabledFn)
     , enabledFn_(enabledFn)
     , targetLufs_(targetLufs)
