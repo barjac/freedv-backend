@@ -39,7 +39,7 @@
 #include "freedv_sanitizers.h"
 
 // Mono EBU R128 momentary loudness meter (K-weighted, gated, over the
-// last 400ms -- see libebur128). Used by LevelerLimiterStep to measure
+// last 400ms -- see libebur128). Used by AgcStep to measure
 // its own output for the leveler's feedback loop.
 class LoudnessMeter
 {

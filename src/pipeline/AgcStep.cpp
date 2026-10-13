@@ -1,5 +1,5 @@
 //=========================================================================
-// Name:            LevelerLimiterStep.cpp
+// Name:            AgcStep.cpp
 // Purpose:         Describes a loudness leveler + look-ahead peak limiter
 //                  step in the audio pipeline.
 //
@@ -39,7 +39,7 @@
 #include <cmath>
 #include <utility>
 
-#include "LevelerLimiterStep.h"
+#include "AgcStep.h"
 
 // ---- Leveler ----
 
@@ -160,10 +160,10 @@ float softKneeGainDb(float levelDb, float thresholdDb, float ratio, float kneeWi
 
 } // namespace
 
-LevelerLimiterStep::LevelerLimiterStep(int sampleRate, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
-                                       float initialGainDb, float initialIntegralErrorDb, float targetLufs,
-                                       realtime_fp<bool()> const& noiseReductionEnabledFn,
-                                       realtime_fp<bool()> const& enabledFn)
+AgcStep::AgcStep(int sampleRate, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
+                 float initialGainDb, float initialIntegralErrorDb, float targetLufs,
+                 realtime_fp<bool()> const& noiseReductionEnabledFn,
+                 realtime_fp<bool()> const& enabledFn)
     : sampleRate_(sampleRate)
     , diagLogger_(std::move(diagLogger))
     , noiseReductionEnabledFn_(noiseReductionEnabledFn)
@@ -196,22 +196,22 @@ LevelerLimiterStep::LevelerLimiterStep(int sampleRate, std::shared_ptr<Diagnosti
     reset();
 }
 
-LevelerLimiterStep::~LevelerLimiterStep()
+AgcStep::~AgcStep()
 {
     // empty
 }
 
-int LevelerLimiterStep::getInputSampleRate() const FREEDV_NONBLOCKING
+int AgcStep::getInputSampleRate() const FREEDV_NONBLOCKING
 {
     return sampleRate_;
 }
 
-int LevelerLimiterStep::getOutputSampleRate() const FREEDV_NONBLOCKING
+int AgcStep::getOutputSampleRate() const FREEDV_NONBLOCKING
 {
     return sampleRate_;
 }
 
-float LevelerLimiterStep::slidingMinimum_(float value) FREEDV_NONBLOCKING
+float AgcStep::slidingMinimum_(float value) FREEDV_NONBLOCKING
 {
     // Monotonic queue: values increase from front to back, so the front is
     // the minimum of the current window. Each entry is pushed and popped at
@@ -236,7 +236,7 @@ float LevelerLimiterStep::slidingMinimum_(float value) FREEDV_NONBLOCKING
     return holdValues_[holdHead_];
 }
 
-short* LevelerLimiterStep::execute(short* inputSamples, int numInputSamples, int* numOutputSamples) FREEDV_NONBLOCKING
+short* AgcStep::execute(short* inputSamples, int numInputSamples, int* numOutputSamples) FREEDV_NONBLOCKING
 {
     const float kneeStartDb = LIMITER_THRESHOLD_DB - LIMITER_KNEE_WIDTH_DB / 2.0f;
 
@@ -404,9 +404,12 @@ short* LevelerLimiterStep::execute(short* inputSamples, int numInputSamples, int
         // deepest limiter gain reduction within the chunk.
         double inputDbfs = peakInAbs > 0.0 ? 20.0 * std::log10(peakInAbs) : -100.0;
         double outputDbfs = peakOutAbs > 0.0 ? 20.0 * std::log10(peakOutAbs) : -100.0;
-        diagLogger_->logChunk(
-            inputDbfs, feedbackValid ? (double)feedbackLufs : -100.0, targetGainDb_, currentGainDb_, (double)appliedGainDb,
-            20.0 * std::log10((double)minGainThisChunk), outputDbfs);
+        if (diagLogger_)
+        {
+            diagLogger_->logChunk(
+                inputDbfs, feedbackValid ? (double)feedbackLufs : -100.0, targetGainDb_, currentGainDb_, (double)appliedGainDb,
+                20.0 * std::log10((double)minGainThisChunk), outputDbfs);
+        }
 
         inPtr += chunkSize;
         outPtr += chunkSize;
@@ -416,7 +419,7 @@ short* LevelerLimiterStep::execute(short* inputSamples, int numInputSamples, int
     return outputSamples_.get();
 }
 
-void LevelerLimiterStep::reset() FREEDV_NONBLOCKING
+void AgcStep::reset() FREEDV_NONBLOCKING
 {
     // Clears only the limiter's state. The leveler's gain and integral
     // state are kept: reset() is called at the start of every

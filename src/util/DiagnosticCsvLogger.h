@@ -43,8 +43,8 @@
 
 // Diagnostic only, not for production use. Opens and writes ~/agc_diag.csv
 // only when built with -DENABLE_AUDIO_DIAG_LOGGING=ON (see the top-level
-// CMakeLists.txt); otherwise every call is a cheap no-op, so
-// LevelerLimiterStep can always be given an instance.
+// CMakeLists.txt); otherwise every call is a cheap no-op. AgcStep takes
+// an optional instance (nullptr means no logging at all).
 //
 // Writes one row per ~10ms processing chunk.
 class DiagnosticCsvLogger
@@ -54,7 +54,7 @@ public:
     ~DiagnosticCsvLogger();
 
     // appliedGainDb differs from currentGainDb only during the leveler's
-    // startup ramp-in (see STARTUP_RAMP_SEC in LevelerLimiterStep.cpp).
+    // startup ramp-in (see STARTUP_RAMP_SEC in AgcStep.cpp).
     void logChunk(double inputDbfs, double feedbackLufs, double targetGainDb, double currentGainDb, double appliedGainDb,
                   double gainReductionDb, double outputDbfs) FREEDV_NONBLOCKING;
 

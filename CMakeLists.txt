@@ -139,7 +139,7 @@ message(STATUS "Enabling unit tests.")
 enable_testing()
 endif(BUILD_BACKEND_UNITTESTS)
 
-# Diagnostic-only CSV logging (LevelerLimiterStep), written to
+# Diagnostic-only CSV logging (AgcStep), written to
 # ~/agc_diag.csv for tuning and evaluation. Off by default since it does
 # blocking file I/O from the real-time audio thread.
 option(ENABLE_AUDIO_DIAG_LOGGING "Enable diagnostic CSV logging in the audio leveler/limiter pipeline step. Not for production builds." OFF)

@@ -4,8 +4,8 @@
 // that reset() forgets (filter history, gain, buffered samples, ...) shows up
 // as a mismatch.
 //
-// LevelerLimiterStep is the exception: its leveler gain deliberately survives
-// a reset (see LevelerLimiterStep::reset()), so it's only checked for
+// AgcStep is the exception: its leveler gain deliberately survives
+// a reset (see AgcStep::reset()), so it's only checked for
 // dropping the audio held in the limiter's look-ahead delay.
 
 #include <algorithm>
@@ -19,7 +19,7 @@
 #include "BandwidthExpandStep.h"
 #include "EitherOrStep.h"
 #include "LevelAdjustStep.h"
-#include "LevelerLimiterStep.h"
+#include "AgcStep.h"
 #include "ResampleStep.h"
 #include "RNNoiseStep.h"
 #include "PipelineTestCommon.h"
@@ -119,14 +119,14 @@ bool resampleDownReset()
     return resetMatchesFresh([]() { return new ResampleStep(48000, 8000); });
 }
 
-bool levelerLimiterResetDropsDelayedAudio()
+bool agcResetDropsDelayedAudio()
 {
     // Loud audio, then reset(), then silence: the limiter delays its output
     // by its look-ahead, so anything nonzero after the reset is audio from
     // before it. (Silence stays silence whatever the leveler gain is.)
     for (int sampleRate : {8000, 16000, 48000})
     {
-        LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>());
+        AgcStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>());
         auto before = makeSignal(sampleRate, 1.0f, 440.0f, 20000.0f, 1);
         run(step, before);
         step.reset();
@@ -192,7 +192,7 @@ bool audioPipelineReset()
     // 8 kHz in -> 16 kHz level adjust -> 16->48 kHz bandwidth expansion ->
     // 48 kHz noise suppression -> 8 kHz out. AudioPipeline::reset() must
     // reach the steps, the inserted resamplers and the result resampler.
-    // (No LevelerLimiterStep here: its gain deliberately survives a reset.)
+    // (No AgcStep here: its gain deliberately survives a reset.)
     return resetMatchesFresh([]() {
         auto pipeline = new AudioPipeline(8000, 8000);
         pipeline->appendPipelineStep(new LevelAdjustStep(16000, +[]() FREEDV_NONBLOCKING { return 0.5f; }));
@@ -218,7 +218,7 @@ int main()
 #define RUN(name) check(#name, name)
     RUN(resampleUpReset);
     RUN(resampleDownReset);
-    RUN(levelerLimiterResetDropsDelayedAudio);
+    RUN(agcResetDropsDelayedAudio);
     RUN(rnnoiseReset);
     RUN(bandwidthExpandReset);
     RUN(eitherOrReset);

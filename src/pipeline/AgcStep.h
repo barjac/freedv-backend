@@ -1,5 +1,5 @@
 //=========================================================================
-// Name:            LevelerLimiterStep.h
+// Name:            AgcStep.h
 // Purpose:         Describes a loudness leveler + look-ahead peak limiter
 //                  step in the audio pipeline.
 //
@@ -34,8 +34,8 @@
 //
 //=========================================================================
 
-#ifndef AUDIO_PIPELINE__LEVELER_LIMITER_STEP_H
-#define AUDIO_PIPELINE__LEVELER_LIMITER_STEP_H
+#ifndef AUDIO_PIPELINE__AGC_STEP_H
+#define AUDIO_PIPELINE__AGC_STEP_H
 
 #include <atomic>
 #include <cstdint>
@@ -46,9 +46,10 @@
 #include "../util/DiagnosticCsvLogger.h"
 #include "../util/realtime_fp.h"
 
-// TX AGC, replacing AgcStep (whose WebRtcAgc_Process, even with
-// compressionGaindB=0, applies a fixed internal ~3:1 compression ratio with
-// makeup gain rather than acting as a pure limiter).
+// TX AGC. Replaces the earlier WebRTC-based implementation (whose
+// WebRtcAgc_Process, even with compressionGaindB=0, applies a fixed internal
+// ~3:1 compression ratio with makeup gain rather than acting as a pure
+// limiter). The AgcStep(int sampleRate) form of the constructor is kept.
 //
 // Two stages, run per 10ms chunk entirely in floating point, so leveler
 // gain that pushes peaks above full scale reaches the limiter intact and
@@ -75,9 +76,10 @@
 //    been trained on uncompressed speech. A lower "compressor" knee was
 //    tried and removed: its frequent gain reduction fed the leveler's
 //    feedback loop an upward bias on loud input.
-class LevelerLimiterStep : public IPipelineStep
+class AgcStep : public IPipelineStep
 {
 public:
+    // diagLogger: optional diagnostic CSV logger (see DiagnosticCsvLogger.h).
     // initialGainDb/initialIntegralErrorDb: resume leveler state saved from
     //   a previous session (e.g. in the application's config file) instead
     //   of starting at 0dB.
@@ -90,11 +92,11 @@ public:
     // enabledFn: polled each chunk. While false, leveler gain is 0dB and
     //   its state is frozen, so re-enabling resumes from where it was. The
     //   limiter stays in circuit either way.
-    LevelerLimiterStep(int sampleRate, std::shared_ptr<DiagnosticCsvLogger> diagLogger,
-                       float initialGainDb = 0.0f, float initialIntegralErrorDb = 0.0f, float targetLufs = -23.0f,
-                       realtime_fp<bool()> const& noiseReductionEnabledFn = +[]() FREEDV_NONBLOCKING { return true; },
-                       realtime_fp<bool()> const& enabledFn = +[]() FREEDV_NONBLOCKING { return true; });
-    virtual ~LevelerLimiterStep();
+    AgcStep(int sampleRate, std::shared_ptr<DiagnosticCsvLogger> diagLogger = nullptr,
+             float initialGainDb = 0.0f, float initialIntegralErrorDb = 0.0f, float targetLufs = -23.0f,
+             realtime_fp<bool()> const& noiseReductionEnabledFn = +[]() FREEDV_NONBLOCKING { return true; },
+             realtime_fp<bool()> const& enabledFn = +[]() FREEDV_NONBLOCKING { return true; });
+    virtual ~AgcStep();
 
     virtual int getInputSampleRate() const FREEDV_NONBLOCKING override;
     virtual int getOutputSampleRate() const FREEDV_NONBLOCKING override;
@@ -171,4 +173,4 @@ private:
     std::unique_ptr<short[]> outputSamples_;
 };
 
-#endif // AUDIO_PIPELINE__LEVELER_LIMITER_STEP_H
+#endif // AUDIO_PIPELINE__AGC_STEP_H

@@ -3,7 +3,7 @@
 #include <memory>
 #include <vector>
 
-#include "LevelerLimiterStep.h"
+#include "AgcStep.h"
 #include "PipelineTestCommon.h"
 
 #ifndef M_PI // not defined by every C library (e.g. on Windows)
@@ -57,7 +57,7 @@ double amplitudeForLufs(double lufs)
 
 // Streams the given signal through the step in chunks, mimicking real-time
 // usage, and returns the concatenated output.
-std::vector<short> runThroughStep(LevelerLimiterStep& step, const std::vector<short>& input, int chunkSize)
+std::vector<short> runThroughStep(AgcStep& step, const std::vector<short>& input, int chunkSize)
 {
     std::vector<short> in(input);
     std::vector<short> output;
@@ -122,7 +122,9 @@ bool levelerConvergesOnTarget()
     constexpr int sampleRate = 8000;
     constexpr double TOLERANCE_DB = 1.0;
 
-    LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>());
+    // Single-argument form, as used by existing callers (no diagnostic
+    // logger).
+    AgcStep step(sampleRate);
 
     auto input = generateSineWave(amplitudeForLufs(-30.0), 1000.0, 60.0, sampleRate); // several time constants
     runThroughStep(step, input, sampleRate / 10);
@@ -145,7 +147,7 @@ bool levelerConvergesOnConfigurableTarget()
     constexpr double TOLERANCE_DB = 1.0;
     constexpr float customTargetLufs = -28.0f; // deliberately not the -23.0f default
 
-    LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, customTargetLufs);
+    AgcStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, customTargetLufs);
 
     auto input = generateSineWave(amplitudeForLufs(-33.0), 1000.0, 60.0, sampleRate);
     runThroughStep(step, input, sampleRate / 10);
@@ -170,7 +172,7 @@ bool levelerFreezesGainInPauses()
     constexpr int sampleRate = 8000;
     constexpr std::size_t meterWindowSamples = sampleRate * 4 / 10;
 
-    LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>());
+    AgcStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>());
 
     // A correction in progress: 1s below target.
     runThroughStep(step, generateSineWave(amplitudeForLufs(-27.0), 1000.0, 1.0, sampleRate), sampleRate / 100);
@@ -204,7 +206,7 @@ bool levelerRecoversFromLowGainAfterLoudPassage()
     constexpr int sampleRate = 8000;
     // Seeded at -8dB (as after a loud passage), speech at -28 LUFS in: the
     // output is ~-36, below the threshold if it were measured on the output.
-    LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), -8.0f, -8.0f * 4.0f, -26.0f);
+    AgcStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), -8.0f, -8.0f * 4.0f, -26.0f);
     runThroughStep(step, generateSineWave(amplitudeForLufs(-28.0), 1000.0, 10.0, sampleRate), sampleRate / 100);
     float gainDb = step.getCurrentGainDb();
     if (gainDb < -2.0f)
@@ -220,7 +222,7 @@ bool levelerRecoversFromLowGainAfterLoudPassage()
 bool levelerCorrectsBigChangeQuickly()
 {
     constexpr int sampleRate = 8000;
-    LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), -8.0f, -8.0f * 4.0f, -26.0f);
+    AgcStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), -8.0f, -8.0f * 4.0f, -26.0f);
     // -28 LUFS in needs about +2dB.
     runThroughStep(step, generateSineWave(amplitudeForLufs(-28.0), 1000.0, 5.0, sampleRate), sampleRate / 100);
     float gainDb = step.getCurrentGainDb();
@@ -244,7 +246,7 @@ bool levelerThresholdBehavesTheSameBothWaysNow()
         const char* label = noiseReductionOn ? "ON" : "OFF";
         realtime_fp<bool()> nrFn = noiseReductionOn ? +[]() FREEDV_NONBLOCKING { return true; } : +noiseReductionOffFn;
 
-        LevelerLimiterStep stepAbove(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, -23.0f, nrFn);
+        AgcStep stepAbove(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, -23.0f, nrFn);
         runThroughStep(stepAbove, aboveInput, sampleRate / 10);
         if (std::abs(stepAbove.getCurrentGainDb()) < 0.1f)
         {
@@ -253,7 +255,7 @@ bool levelerThresholdBehavesTheSameBothWaysNow()
             return false;
         }
 
-        LevelerLimiterStep stepBelow(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, -23.0f, nrFn);
+        AgcStep stepBelow(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, -23.0f, nrFn);
         runThroughStep(stepBelow, belowInput, sampleRate / 10);
         if (stepBelow.getCurrentGainDb() != 0.0f)
         {
@@ -273,7 +275,7 @@ bool levelerResetPreservesGain()
     constexpr int sampleRate = 8000;
     constexpr double TOLERANCE_DB = 0.5;
 
-    LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>());
+    AgcStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>());
 
     auto input = generateSineWave(amplitudeForLufs(-30.0), 1000.0, 5.0, sampleRate);
     runThroughStep(step, input, sampleRate / 10);
@@ -304,14 +306,14 @@ bool levelerCanBeSeededWithSavedGain()
     // Consistent with seededGainDb when output loudness is at target
     // (target gain == integral / LEVELER_INTEGRAL_TIME_CONSTANT_SEC, i.e.
     // 7.5 * 4.0). Must be kept in sync by hand with that constant in
-    // LevelerLimiterStep.cpp.
+    // AgcStep.cpp.
     constexpr float seededIntegralErrorDb = 30.0f;
     constexpr double TOLERANCE_DB = 1.0;
 
     // A -12dBFS peak tone (~-15 LUFS) clears REAL_AUDIO_PEAK_THRESHOLD
     // (-20dBFS) to start the ramp-in. With the seeded gain it comes out at
     // ~-7.5 LUFS, so that is used as the target to keep the loop at rest.
-    LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), seededGainDb, seededIntegralErrorDb, -7.5f);
+    AgcStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), seededGainDb, seededIntegralErrorDb, -7.5f);
 
     if (step.getCurrentGainDb() != seededGainDb || step.getIntegralErrorDb() != seededIntegralErrorDb)
     {
@@ -357,7 +359,7 @@ bool levelerRampInWaitsForRealAudioNotJustElapsedTime()
     constexpr float seededGainDb = 7.5f;
     constexpr float seededIntegralErrorDb = 30.0f; // see levelerCanBeSeededWithSavedGain
 
-    LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), seededGainDb, seededIntegralErrorDb, -7.5f);
+    AgcStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), seededGainDb, seededIntegralErrorDb, -7.5f);
 
     // 3s of silence, simulating idle time before PTT.
     runThroughStep(step, std::vector<short>(sampleRate * 3, 0), sampleRate / 10);
@@ -385,7 +387,7 @@ bool levelerDisabledPassesAudioAtUnityAndKeepsState()
     constexpr float seededIntegralErrorDb = 24.0f;
     constexpr double TOLERANCE_DB = 0.2;
 
-    LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), seededGainDb, seededIntegralErrorDb, -23.0f,
+    AgcStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), seededGainDb, seededIntegralErrorDb, -23.0f,
                             +[]() FREEDV_NONBLOCKING { return true; }, +disabledFn);
 
     // -20dBFS peak, ~-23 LUFS: below the limiter, and loud enough that the
@@ -414,7 +416,7 @@ bool limiterLeavesQuietSignalUnaffected()
     constexpr int sampleRate = 8000;
     constexpr double TOLERANCE_DB = 0.5;
 
-    LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, -23.0f,
+    AgcStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, -23.0f,
                             +[]() FREEDV_NONBLOCKING { return true; }, +disabledFn);
 
     auto input = generateSineWave(amplitudeForPeakDbfs(-20.0), 1000.0, 1.0, sampleRate);
@@ -439,7 +441,7 @@ bool limiterReducesGainForLoudSignal()
     constexpr int sampleRate = 8000;
     constexpr double MIN_EXPECTED_REDUCTION_DB = 0.5; // conservative lower bound
 
-    LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, -23.0f,
+    AgcStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, -23.0f,
                             +[]() FREEDV_NONBLOCKING { return true; }, +disabledFn);
 
     auto input = generateSineWave(32767.0, 1000.0, 1.0, sampleRate);
@@ -466,7 +468,7 @@ bool limiterResetClearsGainReductionState()
     constexpr int sampleRate = 8000;
     constexpr double TOLERANCE_DB = 0.5;
 
-    LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, -23.0f,
+    AgcStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, -23.0f,
                             +[]() FREEDV_NONBLOCKING { return true; }, +disabledFn);
 
     runThroughStep(step, generateSineWave(32767.0, 1000.0, 1.0, sampleRate), sampleRate / 10);
@@ -500,7 +502,7 @@ bool levelerGainAboveFullScaleIsLimitedNotClipped()
     constexpr double SINE_CREST_DB = 3.01;
     constexpr double CREST_TOLERANCE_DB = 0.5;
 
-    LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 6.0f, 24.0f, 0.0f);
+    AgcStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 6.0f, 24.0f, 0.0f);
 
     auto input = generateSineWave(amplitudeForPeakDbfs(-2.0), 1000.0, 2.0, sampleRate);
     auto output = runThroughStep(step, input, sampleRate / 10);
@@ -539,7 +541,7 @@ bool limiterCatchesSuddenOnsets()
     {
         // Seeded at the maximum gain, with a target high enough that the
         // leveler keeps it there.
-        LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(),
+        AgcStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(),
                                 (float)LEVELER_GAIN_DB, (float)LEVELER_GAIN_DB * 4.0f, 0.0f);
 
         // 400ms of quieter tone to complete the startup ramp-in, 200ms of
@@ -576,7 +578,7 @@ bool limiterStaysActiveWithLevelerDisabled()
     constexpr double EXPECTED_MAX_DB = LIMITER_THRESHOLD_DB + (0.0 - LIMITER_THRESHOLD_DB) / LIMITER_RATIO;
     constexpr double TOLERANCE_DB = 0.1;
 
-    LevelerLimiterStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, -23.0f,
+    AgcStep step(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, -23.0f,
                             +[]() FREEDV_NONBLOCKING { return true; }, +disabledFn);
 
     std::vector<short> input(sampleRate / 5, 0);
@@ -615,7 +617,7 @@ bool loudnessUsesLooserSilenceFloorWithNoiseReductionOff()
     auto input = generateSineWave(amplitudeForLufs(approxTargetLufs), 1000.0, 2.0, sampleRate); // long enough for the 400ms window
 
     {
-        LevelerLimiterStep stepOn(sampleRate, std::make_shared<DiagnosticCsvLogger>());
+        AgcStep stepOn(sampleRate, std::make_shared<DiagnosticCsvLogger>());
         runThroughStep(stepOn, input, sampleRate / 10);
         float lufsOn = stepOn.getLastOutputLoudnessLufs();
         if (lufsOn > -99.0f)
@@ -627,7 +629,7 @@ bool loudnessUsesLooserSilenceFloorWithNoiseReductionOff()
     }
 
     {
-        LevelerLimiterStep stepOff(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, -23.0f, +noiseReductionOffFn);
+        AgcStep stepOff(sampleRate, std::make_shared<DiagnosticCsvLogger>(), 0.0f, 0.0f, -23.0f, +noiseReductionOffFn);
         runThroughStep(stepOff, input, sampleRate / 10);
         float lufsOff = stepOff.getLastOutputLoudnessLufs();
         if (lufsOff < -85.0f || lufsOff > -50.0f)
