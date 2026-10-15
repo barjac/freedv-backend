@@ -118,8 +118,6 @@ constexpr float LIMITER_KNEE_WIDTH_DB = 2.0f;
 constexpr float LOOKAHEAD_TIME_SEC = 0.004f;
 constexpr float RELEASE_TIME_SEC = 0.25f;
 
-constexpr float LEVEL_FLOOR_DB = -120.0f; // for log10(0) avoidance
-
 // ---- Output loudness measurement ----
 
 // Silence floors for the output loudness measurement (see the
@@ -129,6 +127,13 @@ constexpr double SILENCE_FLOOR_LUFS_RNNOISE_ON = -70.0;
 constexpr double SILENCE_FLOOR_LUFS_RNNOISE_OFF = -85.0;
 
 constexpr float INVALID_LOUDNESS_LUFS = -100.0f;
+
+// libebur128's momentary loudness re-sums its whole 400ms window on every
+// call, so asking for it on every 10ms chunk costs far more than the chunk
+// itself (as found for the previous AgcStep, which asked every 5th block).
+// The leveler's time constants are seconds, so a reading every 50ms is
+// just as good; the chunks in between use the last one.
+constexpr int LOUDNESS_UPDATE_INTERVAL_CHUNKS = 5;
 
 constexpr int TEN_MS_DIVIDER = 100;
 
@@ -178,6 +183,7 @@ LevelerLimiterStep::LevelerLimiterStep(int sampleRate, std::shared_ptr<Diagnosti
     , liveAppliedGainDb_(0.0f)
     , loudnessMeter_(sampleRate)
     , lastOutputLoudnessLufs_(INVALID_LOUDNESS_LUFS)
+    , chunksSinceLoudnessUpdate_(0)
     , windowLength_(std::max(2, (int)std::lround(sampleRate * LOOKAHEAD_TIME_SEC)))
     , delayBuffer_(std::make_unique<float[]>(windowLength_ - 1))
     , holdValues_(std::make_unique<float[]>(windowLength_))
@@ -238,7 +244,10 @@ float LevelerLimiterStep::slidingMinimum_(float value) FREEDV_NONBLOCKING
 
 short* LevelerLimiterStep::execute(short* inputSamples, int numInputSamples, int* numOutputSamples) FREEDV_NONBLOCKING
 {
+    // Below the knee no gain is needed, so the level only has to be worked
+    // out in dB (log10f, per sample) for samples above it.
     const float kneeStartDb = LIMITER_THRESHOLD_DB - LIMITER_KNEE_WIDTH_DB / 2.0f;
+    const float kneeStartLinear = powf(10.0f, kneeStartDb / 20.0f);
 
     short* inPtr = inputSamples;
     short* outPtr = outputSamples_.get();
@@ -340,9 +349,9 @@ short* LevelerLimiterStep::execute(short* inputSamples, int numInputSamples, int
             // Step 5: gain this sample needs, from the static soft-knee curve.
             float requiredGain = 1.0f;
             float absVal = std::fabs(currentSample);
-            float levelDb = absVal > 0.0f ? 20.0f * log10f(absVal) : LEVEL_FLOOR_DB;
-            if (levelDb > kneeStartDb)
+            if (absVal > kneeStartLinear)
             {
+                float levelDb = 20.0f * log10f(absVal);
                 float kneeOutDb = softKneeGainDb(levelDb, LIMITER_THRESHOLD_DB, LIMITER_RATIO, LIMITER_KNEE_WIDTH_DB);
                 requiredGain = powf(10.0f, (kneeOutDb - levelDb) / 20.0f);
             }
@@ -394,9 +403,13 @@ short* LevelerLimiterStep::execute(short* inputSamples, int numInputSamples, int
         // -100 on silence/no reading rather than leaving a stale value in
         // place, so the leveler holds its gain.
         loudnessMeter_.addFrames(outPtr, chunkSize);
-        double lufs = 0.0;
-        double silenceFloorLufs = noiseReductionEnabled ? SILENCE_FLOOR_LUFS_RNNOISE_ON : SILENCE_FLOOR_LUFS_RNNOISE_OFF;
-        lastOutputLoudnessLufs_ = loudnessMeter_.getMomentaryLoudness(&lufs, silenceFloorLufs) ? (float)lufs : INVALID_LOUDNESS_LUFS;
+        if (++chunksSinceLoudnessUpdate_ >= LOUDNESS_UPDATE_INTERVAL_CHUNKS)
+        {
+            chunksSinceLoudnessUpdate_ = 0;
+            double lufs = 0.0;
+            double silenceFloorLufs = noiseReductionEnabled ? SILENCE_FLOOR_LUFS_RNNOISE_ON : SILENCE_FLOOR_LUFS_RNNOISE_OFF;
+            lastOutputLoudnessLufs_ = loudnessMeter_.getMomentaryLoudness(&lufs, silenceFloorLufs) ? (float)lufs : INVALID_LOUDNESS_LUFS;
+        }
 
         liveAppliedGainDb_.store(appliedGainDb, std::memory_order_relaxed);
 

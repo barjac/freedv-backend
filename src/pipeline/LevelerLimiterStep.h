@@ -139,6 +139,7 @@ private:
     // Output loudness measurement, the leveler's feedback.
     LoudnessMeter loudnessMeter_;
     float lastOutputLoudnessLufs_;
+    int chunksSinceLoudnessUpdate_;
 
     // Limiter.
     // Returns the minimum of the last windowLength_ values passed in.
