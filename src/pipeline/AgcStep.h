@@ -105,17 +105,17 @@ public:
 
     // Leveler state, for persisting across sessions. Not synchronized:
     // only call once the pipeline thread has stopped calling execute().
-    float getCurrentGainDb() const FREEDV_NONBLOCKING { return currentGainDb_; }
-    float getIntegralErrorDb() const FREEDV_NONBLOCKING { return integralErrorDb_; }
+    float getCurrentGainDb() const FREEDV_NONBLOCKING;
+    float getIntegralErrorDb() const FREEDV_NONBLOCKING;
 
     // Most recent momentary loudness of this step's output, or -100.0 if
     // the last reading was silent/invalid. Not synchronized, as above.
-    float getLastOutputLoudnessLufs() const FREEDV_NONBLOCKING { return lastOutputLoudnessLufs_; }
+    float getLastOutputLoudnessLufs() const FREEDV_NONBLOCKING;
 
     // Leveler gain actually applied to the most recent chunk (including the
     // startup ramp-in). Safe to poll from another thread while the
     // pipeline is running, e.g. for a GUI display.
-    float getLiveAppliedGainDb() const FREEDV_NONBLOCKING { return liveAppliedGainDb_.load(std::memory_order_relaxed); }
+    float getLiveAppliedGainDb() const FREEDV_NONBLOCKING;
 
 private:
     int sampleRate_;
@@ -141,6 +141,7 @@ private:
     // Output loudness measurement, the leveler's feedback.
     LoudnessMeter loudnessMeter_;
     float lastOutputLoudnessLufs_;
+    int chunksSinceLoudnessUpdate_;
 
     // Limiter.
     // Returns the minimum of the last windowLength_ values passed in.
